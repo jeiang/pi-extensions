@@ -19,7 +19,7 @@
         npmDeps = pkgs.importNpmLock {npmRoot = ./.;};
         inherit (pkgs.importNpmLock) npmConfigHook;
         npmBuildScript = "check";
-        nativeBuildInputs = [pkgs.git];
+        nativeBuildInputs = [pkgs.git pkgs.bun];
         preBuild = "export HOME=$TMPDIR";
         installPhase = ''
           runHook preInstall
@@ -37,7 +37,7 @@
     });
 
     devShells = forAllSystems (pkgs: {
-      default = pkgs.mkShell {packages = [pkgs.nodejs_24];};
+      default = pkgs.mkShell {packages = [pkgs.nodejs_24 pkgs.bun];};
     });
   };
 }

@@ -1,19 +1,18 @@
 import {
 	type BashOperations,
 	createBashToolDefinition,
-	createEditToolDefinition,
 	createFindToolDefinition,
 	createGrepToolDefinition,
 	createLocalBashOperations,
 	createLsToolDefinition,
-	createReadToolDefinition,
-	createWriteToolDefinition,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { EditStore } from "@oh-my-pi/pi-natives";
 import { type Static, type TObject, Type } from "typebox";
 import { applyEnv, type Devshell, resolveDevshell } from "./devshell.ts";
+import { hashlineTools } from "./hashline.ts";
 import { registerShell } from "./shell.ts";
 import { createWorktree, detectRepo, GIT_MUTATION, type Repo, remapPath, slug } from "./worktree.ts";
 
@@ -78,17 +77,25 @@ export default function (pi: ExtensionAPI) {
 				const note = options.mutates ? await ensureWorktree(ctx) : undefined;
 				const input = { ...params };
 				if ("path" in input && typeof input.path === "string") Object.assign(input, { path: remap(input.path) });
+				if ("input" in input && typeof input.input === "string" && repo && worktree) {
+					const { root } = repo;
+					const target = worktree.path;
+					Object.assign(input, { input: input.input.replace(/\[([^\]#\n]+)#/g, (_m, path: string) => `[${remapPath(path, root, target)}#`) });
+				}
 				const dir = cwd();
 				const result = await factory(dir).execute(id, input, signal, onUpdate, inCwd(ctx, dir));
+				// Hooks such as pi-lsp's read the path a tool reports through its call input.
+				if ("path" in input && !("path" in params)) Object.assign(params, { path: input.path });
 				if (note) result.content = [{ type: "text", text: note }, ...result.content];
 				return result;
 			},
 		});
 	};
 
-	override((dir) => createReadToolDefinition(dir));
-	override((dir) => createEditToolDefinition(dir), { mutates: true });
-	override((dir) => createWriteToolDefinition(dir), { mutates: true });
+	const hashline = hashlineTools(new EditStore());
+	override(hashline.read);
+	override(hashline.edit, { mutates: true });
+	override(hashline.write, { mutates: true });
 	override((dir) => createGrepToolDefinition(dir), { exposure: "codemode" });
 	override((dir) => createFindToolDefinition(dir), { exposure: "codemode" });
 	override((dir) => createLsToolDefinition(dir), { exposure: "codemode" });
