@@ -4,6 +4,7 @@ Extensions for the [pi](https://github.com/earendil-works/pi) coding agent.
 
 | Extension | Purpose |
 |---|---|
+| `guards` | Blocks permanent installs and git history rewrites in `bash`/`shell` (the user can allow one in a dialog), asks before any tool touches `~/.ssh`, `~/.gnupg`, `~/.config/sops`, `~/Library`, or `/etc`, and masks secrets in tool output. |
 | `chains` | Fallback chains as virtual models (`chain/<name>`): per-provider cooldowns shared across processes, retries and usage limits move to the next target, compaction at a per-chain token count, `/chain-reset`. |
 
 ## chains
