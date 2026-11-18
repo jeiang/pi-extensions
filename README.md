@@ -12,6 +12,7 @@ Extensions for the [pi](https://github.com/earendil-works/pi) coding agent.
 | `emphasis` | Draws `[[Word]]` status pills and label icons in interactive replies and tells the model the vocabulary (adapted from [pi-emphasis](https://github.com/johnlindquist/pi-emphasis), MIT). |
 | `turn-time` | Elapsed time while the agent works; the last turn's time in the footer. |
 | `github` | `run_watch` (CI jobs and steps until done, fail fast with the failed log tail) and `pr_view`. |
+| `images` | Draws a reply's ```` ```svg ```` blocks (rasterized by the `resvg` CLI on `PATH`) and linked local images below it, in interactive sessions. |
 
 ## chains
 
