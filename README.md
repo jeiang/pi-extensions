@@ -13,6 +13,7 @@ Extensions for the [pi](https://github.com/earendil-works/pi) coding agent.
 | `turn-time` | Elapsed time while the agent works; the last turn's time in the footer. |
 | `github` | `run_watch` (CI jobs and steps until done, fail fast with the failed log tail) and `pr_view`. |
 | `images` | Draws a reply's ```` ```svg ```` blocks (rasterized by the `resvg` CLI on `PATH`) and linked local images below it, in interactive sessions. |
+| `loadout` | Leaves the tools named in `loadout.json` (`{"hidden": [...]}`) out of the model's tool list; they stay callable from codemode and findable with `searchTools()`. |
 
 The package also bundles the third-party pi packages the setup loads, so one
 lock file pins them: `pi-lens`, `@ian-pascoe/pi-lsp`, and `pi-web-access`,
