@@ -129,7 +129,11 @@ export function hashlineTools(store: EditStore) {
 					if (first) Object.assign(input, { path: first.path });
 					return {
 						content: [{ type: "text", text: outcome.text }],
-						details: { diff: outcome.files.map((file) => file.diff).join("\n"), firstChangedLine: first?.firstChangedLine },
+						details: {
+							// The native engine separates line numbers with "|"; pi's diff renderer expects a space.
+							diff: outcome.files.map((file) => file.diff.replace(/^([ +-]\s*\d+)\|/gm, "$1 ")).join("\n"),
+							firstChangedLine: first?.firstChangedLine,
+						},
 						isError: outcome.isError,
 					};
 				} finally {
