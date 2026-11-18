@@ -19,6 +19,7 @@
         npmDeps = pkgs.importNpmLock {npmRoot = ./.;};
         inherit (pkgs.importNpmLock) npmConfigHook;
         npmBuildScript = "check";
+        nativeBuildInputs = [pkgs.git];
         preBuild = "export HOME=$TMPDIR";
         installPhase = ''
           runHook preInstall
