@@ -14,6 +14,10 @@ Extensions for the [pi](https://github.com/earendil-works/pi) coding agent.
 | `github` | `run_watch` (CI jobs and steps until done, fail fast with the failed log tail) and `pr_view`. |
 | `images` | Draws a reply's ```` ```svg ```` blocks (rasterized by the `resvg` CLI on `PATH`) and linked local images below it, in interactive sessions. |
 
+The package also bundles the third-party pi packages the setup loads, so one
+lock file pins them: `pi-lens`, `@ian-pascoe/pi-lsp`, and `pi-web-access`,
+under `node_modules/`.
+
 ## chains
 
 Reads `chains.json` from the agent directory (or `PI_CHAINS_CONFIG`):
