@@ -105,9 +105,10 @@ export function createChains(config: ChainsConfig) {
 							writeCooldowns(cooldownFile, cooldowns);
 						}
 					}
+					// A provider the user never signed in to fails with an auth error, not a usage limit, which would end the turn.
 					const resolved = chain.targets.flatMap((target) => {
 						const model = ctx.modelRegistry.find(target.provider, target.id);
-						return model ? [{ target, model }] : [];
+						return model && ctx.modelRegistry.hasConfiguredAuth(model) ? [{ target, model }] : [];
 					});
 					if (resolved.length === 0) throw new Error(`chain/${id}: no target model is available`);
 					const isReady = (model: Model<Api>) => (cooldowns[model.provider] ?? 0) <= now;
