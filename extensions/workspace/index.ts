@@ -12,7 +12,7 @@ import {
 import { EditStore } from "@oh-my-pi/pi-natives";
 import { resolve } from "node:path";
 import { type Static, type TObject, Type } from "typebox";
-import { applyEnv, type Devshell, resolveDevshell } from "./devshell.ts";
+import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerShell } from "./shell.ts";
 import { createWorktree, detectRepo, GIT_MUTATION, type Repo, remapPath, slug } from "./worktree.ts";
@@ -37,19 +37,23 @@ export default function (pi: ExtensionAPI) {
 	const remap = (path: unknown) => (typeof path === "string" && repo && worktree ? remapPath(path, repo.root, worktree.path) : path);
 	const needsWorktree = () => Boolean(repo && !repo.linked && repo.hasCommits && !worktree);
 
-	const devshells = new Map<string, Promise<Devshell | undefined>>();
+	const devshells = new Map<string, { stamp: string; pending: Promise<Devshell | undefined> }>();
 	const devshellErrors = new Map<string, string>();
 	const env = async (dir: string): Promise<NodeJS.ProcessEnv> => {
-		let pending = devshells.get(dir);
-		if (!pending) {
-			pending = resolveDevshell(dir).catch((error: Error) => {
+		// A flake created or edited mid-session changes the stamp, so the next command gets its devshell.
+		const stamp = devshellStamp(dir);
+		let entry = devshells.get(dir);
+		if (entry?.stamp !== stamp) {
+			devshellErrors.delete(dir);
+			const pending = resolveDevshell(dir).catch((error: Error) => {
 				devshellErrors.set(dir, error.message.split("\n").slice(0, 5).join("\n"));
 				devshells.delete(dir);
 				return undefined;
 			});
-			devshells.set(dir, pending);
+			entry = { stamp, pending };
+			devshells.set(dir, entry);
 		}
-		return applyEnv(process.env, await pending);
+		return applyEnv(process.env, await entry.pending);
 	};
 
 	const ensureWorktree = async (ctx: ExtensionContext, name?: string): Promise<string | undefined> => {

@@ -11,7 +11,7 @@ export type Env = Record<string, string | undefined>;
 
 export interface Devshell {
 	root: string;
-	kind: "direnv" | "devenv" | "flake" | "shell.nix";
+	kind: "devenv" | "flake" | "shell.nix";
 	/** Variables to set; `undefined` unsets. */
 	env: Env;
 }
@@ -37,7 +37,9 @@ const IGNORED = new Set([
 	"UID",
 ]);
 
-const MARKERS = [".envrc", "devenv.nix", "flake.nix", "shell.nix"];
+// .envrc is no marker: nix-direnv's manual reload never builds the cache a fresh worktree lacks.
+const MARKERS = ["devenv.nix", "flake.nix", "shell.nix"];
+const INPUTS = [...MARKERS, "devenv.yaml", "devenv.lock", "flake.lock"];
 
 export function findRoot(cwd: string): string | undefined {
 	const home = homedir();
@@ -45,6 +47,13 @@ export function findRoot(cwd: string): string | undefined {
 		if (MARKERS.some((marker) => existsSync(join(dir, marker)))) return dir;
 		if (dir === home || dir === dirname(dir)) return undefined;
 	}
+}
+
+/** Changes when the governing devshell root or any of its input files changes. */
+export function devshellStamp(cwd: string): string {
+	const root = findRoot(cwd);
+	if (!root) return "";
+	return [root, ...INPUTS.map((file) => (existsSync(join(root, file)) ? statSync(join(root, file)).mtimeMs : 0))].join(":");
 }
 
 const cacheDir = () => join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "pi-devshell");
@@ -84,16 +93,6 @@ function fromDevEnv(json: string): Env {
 	return env;
 }
 
-async function direnv(root: string, cwd: string): Promise<Env | undefined> {
-	try {
-		const { stdout } = await run("direnv", ["export", "json"], { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, DIRENV_LOG_FORMAT: "" } });
-		if (!stdout.trim()) return existsSync(join(root, ".envrc")) ? undefined : {};
-		return JSON.parse(stdout) as Env;
-	} catch {
-		return undefined;
-	}
-}
-
 interface DirenvStatus {
 	state?: { foundRC?: { allowed?: unknown } | null };
 }
@@ -114,10 +113,6 @@ export async function resolveDevshell(cwd: string): Promise<Devshell | undefined
 	const root = findRoot(cwd);
 	if (!root) return undefined;
 	const has = (file: string) => existsSync(join(root, file));
-	if (has(".envrc") && (await direnvAllowed(root))) {
-		const env = await direnv(root, cwd);
-		if (env) return { root, kind: "direnv", env };
-	}
 	if (has("devenv.nix")) {
 		const key = fingerprint(root, ["devenv.nix", "devenv.yaml", "devenv.lock"]);
 		const env = await cached(`devenv-${key}`, async () => {
@@ -156,6 +151,6 @@ export function applyEnv(base: NodeJS.ProcessEnv, devshell: Devshell | undefined
 		if (value === undefined || value === null) delete env[name];
 		else env[name] = value;
 	}
-	if (devshell.kind !== "direnv" && devshell.env.PATH && base.PATH) env.PATH = `${devshell.env.PATH}:${base.PATH}`;
+	if (devshell.env.PATH && base.PATH) env.PATH = `${devshell.env.PATH}:${base.PATH}`;
 	return env;
 }
