@@ -122,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	registerShell(pi, { cwd, env });
+	registerShell(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
 
 	pi.on("user_bash", async (event) => {
 		const local = createLocalBashOperations();

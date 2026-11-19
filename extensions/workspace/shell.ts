@@ -122,6 +122,8 @@ export function grepRoute(command: string): Record<string, unknown> | undefined 
 export interface ShellOptions {
 	cwd: () => string;
 	env: (cwd: string) => Promise<NodeJS.ProcessEnv>;
+	/** Why the devshell for `cwd` failed to load, if it did. */
+	devshellError: (cwd: string) => string | undefined;
 }
 
 export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
@@ -142,11 +144,12 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		mkdirSync(logDir, { recursive: true });
 		const id = `job${next++}`;
 		const log = join(logDir, `${process.pid}-${id}.log`);
-		writeFileSync(log, "");
+		const env = await options.env(cwd);
+		const devshellError = options.devshellError(cwd);
+		writeFileSync(log, devshellError ? `[shell] devshell failed, ran without it:\n${devshellError}\n` : "");
 		const controller = new AbortController();
 		const listeners = new Set<(line: string) => void>();
 		let partial = "";
-		const env = await options.env(cwd);
 		const job: Job = { id, command, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, done: Promise.resolve() };
 		job.done = ops
 			.exec(command, cwd, {
