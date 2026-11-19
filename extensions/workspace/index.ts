@@ -10,6 +10,7 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { EditStore } from "@oh-my-pi/pi-natives";
+import { resolve } from "node:path";
 import { type Static, type TObject, Type } from "typebox";
 import { applyEnv, type Devshell, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
@@ -138,6 +139,16 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event) => {
+		if (event.toolName.startsWith("lsp_")) {
+			// pi-lsp resolves paths against the session cwd, which is still the main checkout.
+			if (!worktree) return;
+			const input: Record<string, unknown> = event.input;
+			for (const key of ["file_path", "root_path"]) {
+				const value = input[key];
+				if (typeof value === "string" && !value.includes("://")) input[key] = resolve(worktree.path, String(remap(value)));
+			}
+			return;
+		}
 		if (event.toolName !== "bash" && event.toolName !== "shell") return;
 		const command = (event.input as { command?: unknown }).command;
 		if (typeof command !== "string" || !needsWorktree() || !GIT_MUTATION.test(command) || /\bcd\s|\bgit\s+-C\s/.test(command)) return;
