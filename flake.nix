@@ -27,6 +27,11 @@
           mkdir -p $out
           cp -r extensions package.json $out/
           if [ -d node_modules ]; then cp -r node_modules $out/; fi
+          # pi-lens skips files its project .gitignore covers, so it never analyzed the session's
+          # .worktrees/<name> checkout (workspace extension); treat such files as their own project.
+          substituteInPlace $out/node_modules/pi-lens/dist/index.js \
+            --replace-fail 'const targetIgnored = isPathIgnoredByProject(' 'const targetIgnored = !filePath.includes("/.worktrees/") && isPathIgnoredByProject(' \
+            --replace-fail 'if (isPathIgnoredByProject(filePath, deps._ownerRoot ?? workspaceRoot, false)) {' 'if (!filePath.includes("/.worktrees/") && isPathIgnoredByProject(filePath, deps._ownerRoot ?? workspaceRoot, false)) {'
           runHook postInstall
         '';
       };

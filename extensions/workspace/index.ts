@@ -85,8 +85,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				const dir = cwd();
 				const result = await factory(dir).execute(id, input, signal, onUpdate, inCwd(ctx, dir));
-				// Hooks such as pi-lsp's read the path a tool reports through its call input.
-				if ("path" in input && !("path" in params)) Object.assign(params, { path: input.path });
+				// Hooks such as pi-lsp's and pi-lens's read the path a tool reports through its call input,
+				// and resolve a relative one against the main checkout.
+				if ("path" in input && typeof input.path === "string")
+					Object.assign(params, { path: worktree ? resolve(dir, input.path) : input.path });
 				if (note) result.content = [{ type: "text", text: note }, ...result.content];
 				return result;
 			},
