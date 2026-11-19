@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, symlinkSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { direnvAllowed } from "./devshell.ts";
 
@@ -99,12 +99,25 @@ async function allowDirenv(root: string, worktree: string) {
 	await run("direnv", ["allow", worktree]).catch(() => undefined);
 }
 
+/** Resolves symlinks in the directories of a path that may not exist yet, keeping its last component. */
+function realDir(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		const parent = dirname(path);
+		return parent === path ? path : join(realDir(parent), basename(path));
+	}
+}
+
 /** Maps a path under the main checkout to the same path in the worktree; leaves others alone. */
 export function remapPath(path: string, root: string, worktree: string): string {
 	const raw = path.replace(/^@/, "");
 	if (!isAbsolute(raw)) return raw;
-	const rel = relative(root, raw);
-	if (rel.startsWith("..") || isAbsolute(rel) || rel === ".worktrees" || rel.startsWith(".worktrees/")) return raw;
+	const outside = (rel: string) => rel.startsWith("..") || isAbsolute(rel);
+	let rel = relative(root, raw);
+	// git reports the real root, so /tmp/repo on macOS arrives as /private/tmp/repo.
+	if (outside(rel)) rel = relative(root, join(realDir(dirname(raw)), basename(raw)));
+	if (outside(rel) || rel === ".worktrees" || rel.startsWith(".worktrees/")) return raw;
 	return join(worktree, rel);
 }
 
