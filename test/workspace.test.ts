@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
 import { grepRoute } from "../extensions/workspace/shell.ts";
+import { remapPath } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
 function repo(): string {
@@ -85,4 +86,16 @@ test("grepRoute serves plain rg and grep calls only", () => {
 	assert.equal(grepRoute("grep foo"), undefined);
 	assert.equal(grepRoute("rg --json foo"), undefined);
 	assert.equal(grepRoute("rg $PAT"), undefined);
+});
+
+test("remapPath follows a symlinked alias of the checkout but not a symlinked file inside it", () => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), "ws-remap-")));
+	const root = join(base, "repo");
+	const wt = join(root, ".worktrees", "x");
+	mkdirSync(root);
+	symlinkSync(root, join(base, "alias"));
+	symlinkSync("/etc/hosts", join(root, "link"));
+	assert.equal(remapPath(join(base, "alias", "sub", "new.txt"), root, wt), join(wt, "sub", "new.txt"));
+	assert.equal(remapPath(join(root, "link"), root, wt), join(wt, "link"));
+	assert.equal(remapPath(join(base, "other.txt"), root, wt), join(base, "other.txt"));
 });
