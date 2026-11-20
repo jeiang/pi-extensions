@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { sessionDir } from "../workspace/cwd.ts";
 
 interface Rule {
 	pattern: RegExp;
@@ -91,7 +92,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (PATH_TOOLS[event.toolName] && typeof input.path === "string") {
-			const folder = restrictedFolder(input.path, ctx.cwd);
+			const folder = restrictedFolder(input.path, sessionDir(ctx));
 			if (folder && !(await allow(ctx, `Allow ${event.toolName} in ${folder}?`, input.path))) {
 				return { block: true, reason: `${folder} is restricted. Ask the user before touching it.` };
 			}

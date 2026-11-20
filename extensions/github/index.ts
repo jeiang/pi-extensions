@@ -5,6 +5,7 @@ import type { AgentToolResult, ExtensionAPI, Theme } from "@earendil-works/pi-co
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { formatDuration } from "../turn-time/index.ts";
+import { sessionDir } from "../workspace/cwd.ts";
 
 const run = promisify(execFile);
 const POLL_MS = 15_000;
@@ -95,8 +96,9 @@ export default function (pi: ExtensionAPI) {
 		parameters: params,
 		exposure: "model-only",
 		async execute(_id, input: Static<typeof params>, signal, onUpdate, ctx): Promise<AgentToolResult<Details>> {
+			const cwd = sessionDir(ctx);
 			if (input.op === "pr_view") {
-				const pr = await gh<Record<string, unknown>>(ctx.cwd, [
+				const pr = await gh<Record<string, unknown>>(cwd, [
 					"pr",
 					"view",
 					...(input.pr ? [input.pr] : []),
@@ -108,14 +110,14 @@ export default function (pi: ExtensionAPI) {
 			let ids: string[];
 			if (input.run) ids = [input.run];
 			else {
-				const sha = (await run("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd })).stdout.trim();
-				const listed = await gh<{ databaseId: number }[]>(ctx.cwd, ["run", "list", "--commit", sha, "--json", "databaseId"]);
+				const sha = (await run("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim();
+				const listed = await gh<{ databaseId: number }[]>(cwd, ["run", "list", "--commit", sha, "--json", "databaseId"]);
 				ids = listed.map((r) => String(r.databaseId));
 				if (ids.length === 0) return { content: [{ type: "text", text: `No runs for ${sha} yet.` }], details: { runs: [] } };
 			}
 			let runs: RunView[] = [];
 			while (!signal?.aborted) {
-				runs = await Promise.all(ids.map((id) => gh<RunView>(ctx.cwd, ["run", "view", id, "--json", RUN_FIELDS])));
+				runs = await Promise.all(ids.map((id) => gh<RunView>(cwd, ["run", "view", id, "--json", RUN_FIELDS])));
 				onUpdate?.({ content: [{ type: "text", text: renderRuns(runs) }], details: { runs } });
 				const failure = runs.find((r) => r.jobs.some(failed));
 				if (failure || runs.every((r) => r.status === "completed")) break;
@@ -124,7 +126,7 @@ export default function (pi: ExtensionAPI) {
 			let text = renderRuns(runs, undefined, false);
 			const failure = runs.find((r) => r.jobs.some(failed));
 			if (failure) {
-				const log = await ghText(ctx.cwd, ["run", "view", String(failure.databaseId), "--log-failed"]).catch((error: Error) => error.message);
+				const log = await ghText(cwd, ["run", "view", String(failure.databaseId), "--log-failed"]).catch((error: Error) => error.message);
 				text += `\n\nFailed log tail (${failure.workflowName}):\n${log.trimEnd().split("\n").slice(-LOG_LINES).join("\n")}`;
 			}
 			return { content: [{ type: "text", text }], details: { runs }, isError: Boolean(failure) };

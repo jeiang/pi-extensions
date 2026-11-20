@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Image } from "@earendil-works/pi-tui";
+import { sessionDir } from "../workspace/cwd.ts";
 
 const SVG_BLOCK = /^```svg\n([\s\S]*?)\n```/gm;
 const IMAGE_PATH = /!\[[^\]]*\]\(([^)\s]+\.(?:png|jpe?g|gif|webp))\)/gi;
@@ -44,7 +45,7 @@ export default function (pi: ExtensionAPI) {
 			const path = match[1] ?? "";
 			const mimeType = MIME[extname(path).toLowerCase()];
 			if (!mimeType) continue;
-			const data = await readFile(isAbsolute(path) ? path : resolve(ctx.cwd, path)).catch(() => undefined);
+			const data = await readFile(isAbsolute(path) ? path : resolve(sessionDir(ctx), path)).catch(() => undefined);
 			if (data) pi.appendEntry<Picture>("image", { data: data.toString("base64"), mimeType });
 		}
 	});

@@ -13,6 +13,7 @@ import { EditStore } from "@oh-my-pi/pi-natives";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Static, type TObject, Type } from "typebox";
+import { setSessionDir } from "./cwd.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerShell } from "./shell.ts";
@@ -79,6 +80,7 @@ export default function (pi: ExtensionAPI) {
 
 	const switchTo = (ctx: ExtensionContext, next: Worktree | undefined) => {
 		worktree = next;
+		setSessionDir(ctx, next?.path);
 		pi.appendEntry(ENTRY, next ?? null);
 		if (next && ctx.hasUI) ctx.ui.notify(`Worktree ${next.path} on ${next.branch}`, "info");
 	};
@@ -151,6 +153,7 @@ export default function (pi: ExtensionAPI) {
 			.at(-1);
 		const data = saved?.type === "custom" ? (saved.data as Worktree | null | undefined) : undefined;
 		worktree = data && existsSync(data.path) ? data : undefined;
+		setSessionDir(ctx, worktree?.path);
 	});
 
 	pi.on("before_agent_start", (event) => {
@@ -158,11 +161,10 @@ export default function (pi: ExtensionAPI) {
 		if (worktree) event.systemPromptOptions.cwd = worktree.path;
 	});
 
-	pi.on("tool_call", (event) => {
-		if (worktree && !existsSync(worktree.path)) {
-			worktree = undefined;
-			pi.appendEntry(ENTRY, null);
-		}
+	pi.on("session_shutdown", (_event, ctx) => setSessionDir(ctx, undefined));
+
+	pi.on("tool_call", (event, ctx) => {
+		if (worktree && !existsSync(worktree.path)) switchTo(ctx, undefined);
 		const input: Record<string, unknown> = event.input;
 		if (event.toolName.startsWith("lsp_")) {
 			// pi-lsp resolves paths against the session cwd, which is still the main checkout.
@@ -187,11 +189,6 @@ export default function (pi: ExtensionAPI) {
 			place(input);
 			if (input.args && typeof input.args === "object") place(input.args as Record<string, unknown>);
 			input.cwd ??= dir;
-			return;
-		}
-		if (event.toolName === "github") {
-			// The github tool runs gh in the session cwd, whose branch is the main checkout's.
-			if (worktree && input.op === "pr_view" && input.pr === undefined) input.pr = worktree.branch;
 			return;
 		}
 		if (event.toolName === "edit" || event.toolName === "write") {
