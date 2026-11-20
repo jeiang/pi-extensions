@@ -10,18 +10,38 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { EditStore } from "@oh-my-pi/pi-natives";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Static, type TObject, Type } from "typebox";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerShell } from "./shell.ts";
-import { createWorktree, detectRepo, GIT_MUTATION, type Repo, remapPath, slug } from "./worktree.ts";
+import {
+	baseRef,
+	carryChanges,
+	checkoutRelative,
+	createWorktree,
+	detectRepo,
+	enterWorktree,
+	fastForwardMain,
+	GIT_MUTATION,
+	ownWorktrees,
+	pruneWorktrees,
+	type Repo,
+	removeWorktree,
+	remapPath,
+	slug,
+	type Worktree,
+} from "./worktree.ts";
+
+const ENTRY = "workspace-worktree";
+const NEEDS_WORKTREE =
+	"The main checkout stays untouched. Call the worktree tool first (action create with a short kebab-case name, or enter with an existing branch); paths and git commands then resolve in that worktree.";
 
 export default function (pi: ExtensionAPI) {
 	let sessionCwd = process.cwd();
 	let repo: Repo | undefined;
-	let worktree: { path: string; branch: string; base: string } | undefined;
-	let creating: Promise<string> | undefined;
+	let worktree: Worktree | undefined;
 	let request = "";
 
 	const cwd = () => worktree?.path ?? sessionCwd;
@@ -36,6 +56,7 @@ export default function (pi: ExtensionAPI) {
 		});
 	const remap = (path: unknown) => (typeof path === "string" && repo && worktree ? remapPath(path, repo.root, worktree.path) : path);
 	const needsWorktree = () => Boolean(repo && !repo.linked && repo.hasCommits && !worktree);
+	const inMainCheckout = (path: string) => Boolean(repo && checkoutRelative(resolve(sessionCwd, path.replace(/^@/, "")), repo.root) !== undefined);
 
 	const devshells = new Map<string, { stamp: string; pending: Promise<Devshell | undefined> }>();
 	const devshellErrors = new Map<string, string>();
@@ -56,30 +77,18 @@ export default function (pi: ExtensionAPI) {
 		return applyEnv(process.env, await entry.pending);
 	};
 
-	const ensureWorktree = async (ctx: ExtensionContext, name?: string): Promise<string | undefined> => {
-		if (!needsWorktree() || !repo) return undefined;
-		creating ??= createWorktree(repo.root, name ?? (request || "work")).then((created) => {
-			worktree = created;
-			if (ctx.hasUI) ctx.ui.notify(`Worktree ${created.path} on ${created.branch} from ${created.base}`, "info");
-			return `Created worktree ${created.path} on branch ${created.branch} from ${created.base}. All paths now resolve there; the main checkout stays untouched.`;
-		});
-		try {
-			return await creating;
-		} finally {
-			creating = undefined;
-		}
+	const switchTo = (ctx: ExtensionContext, next: Worktree | undefined) => {
+		worktree = next;
+		pi.appendEntry(ENTRY, next ?? null);
+		if (next && ctx.hasUI) ctx.ui.notify(`Worktree ${next.path} on ${next.branch}`, "info");
 	};
 
-	const override = <P extends TObject, D, S>(
-		factory: (dir: string) => ToolDefinition<P, D, S>,
-		options: { exposure?: "codemode"; mutates?: boolean } = {},
-	) => {
+	const override = <P extends TObject, D, S>(factory: (dir: string) => ToolDefinition<P, D, S>, options: { exposure?: "codemode" } = {}) => {
 		const template = factory(sessionCwd);
 		pi.registerTool({
 			...template,
 			exposure: options.exposure ?? template.exposure,
 			async execute(id, params, signal, onUpdate, ctx) {
-				const note = options.mutates ? await ensureWorktree(ctx) : undefined;
 				const input = { ...params };
 				if ("path" in input && typeof input.path === "string") Object.assign(input, { path: remap(input.path) });
 				if ("input" in input && typeof input.input === "string" && repo && worktree) {
@@ -93,7 +102,6 @@ export default function (pi: ExtensionAPI) {
 				// and resolve a relative one against the main checkout.
 				if ("path" in input && typeof input.path === "string")
 					Object.assign(params, { path: worktree ? resolve(dir, input.path) : input.path });
-				if (note) result.content = [{ type: "text", text: note }, ...result.content];
 				return result;
 			},
 		});
@@ -101,8 +109,8 @@ export default function (pi: ExtensionAPI) {
 
 	const hashline = hashlineTools(new EditStore());
 	override(hashline.read);
-	override(hashline.edit, { mutates: true });
-	override(hashline.write, { mutates: true });
+	override(hashline.edit);
+	override(hashline.write);
 	override((dir) => createGrepToolDefinition(dir), { exposure: "codemode" });
 	override((dir) => createFindToolDefinition(dir), { exposure: "codemode" });
 	override((dir) => createLsToolDefinition(dir), { exposure: "codemode" });
@@ -137,6 +145,12 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCwd = ctx.cwd;
 		repo = await detectRepo(ctx.cwd);
+		const saved = ctx.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom" && entry.customType === ENTRY)
+			.at(-1);
+		const data = saved?.type === "custom" ? (saved.data as Worktree | null | undefined) : undefined;
+		worktree = data && existsSync(data.path) ? data : undefined;
 	});
 
 	pi.on("before_agent_start", (event) => {
@@ -145,51 +159,131 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event) => {
+		const input: Record<string, unknown> = event.input;
 		if (event.toolName.startsWith("lsp_")) {
 			// pi-lsp resolves paths against the session cwd, which is still the main checkout.
 			if (!worktree) return;
-			const input: Record<string, unknown> = event.input;
 			for (const key of ["file_path", "root_path"]) {
 				const value = input[key];
 				if (typeof value === "string" && !value.includes("://")) input[key] = resolve(worktree.path, String(remap(value)));
 			}
 			return;
 		}
+		if (event.toolName === "subagent") {
+			// pi-subagents defaults a child's cwd to the session cwd, which is still the main checkout.
+			if (!worktree || input.action !== undefined || input.machine !== undefined) return;
+			const dir = worktree.path;
+			const place = (item: Record<string, unknown>) => {
+				if (typeof item.cwd === "string") item.cwd = resolve(dir, String(remap(item.cwd)));
+				for (const key of ["tasks", "chain", "parallel"]) {
+					const list = item[key];
+					if (Array.isArray(list)) for (const child of list) if (child && typeof child === "object") place(child as Record<string, unknown>);
+				}
+			};
+			place(input);
+			if (input.args && typeof input.args === "object") place(input.args as Record<string, unknown>);
+			input.cwd ??= dir;
+			return;
+		}
+		if (event.toolName === "github") {
+			// The github tool runs gh in the session cwd, whose branch is the main checkout's.
+			if (worktree && input.op === "pr_view" && input.pr === undefined) input.pr = worktree.branch;
+			return;
+		}
+		if (event.toolName === "edit" || event.toolName === "write") {
+			if (!needsWorktree()) return;
+			const paths =
+				typeof input.path === "string"
+					? [input.path]
+					: typeof input.input === "string"
+						? [...input.input.matchAll(/\[([^\]#\n]+)#/g)].map((match) => match[1] ?? "")
+						: [];
+			if (paths.some(inMainCheckout)) return { block: true, reason: NEEDS_WORKTREE };
+			return;
+		}
 		if (event.toolName !== "bash" && event.toolName !== "shell") return;
-		const command = (event.input as { command?: unknown }).command;
+		const command = input.command;
 		if (typeof command !== "string" || !needsWorktree() || !GIT_MUTATION.test(command) || /\bcd\s|\bgit\s+-C\s/.test(command)) return;
-		return {
-			block: true,
-			reason: "The main checkout stays untouched. Call the worktree tool first; git commands then run in the new worktree.",
-		};
+		return { block: true, reason: NEEDS_WORKTREE };
+	});
+
+	pi.on("tool_result", async (event) => {
+		if (event.toolName !== "github" || event.isError || !repo || repo.linked) return;
+		const text = event.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+		if (/"mergedAt": "\d/.test(text)) await fastForwardMain(repo.root, await baseRef(repo.root));
 	});
 
 	const worktreeParams = Type.Object({
-		name: Type.String({ description: "Short kebab-case branch and directory name for the change." }),
+		action: Type.Union([
+			Type.Literal("create"),
+			Type.Literal("enter"),
+			Type.Literal("remove"),
+			Type.Literal("list"),
+			Type.Literal("prune"),
+			Type.Literal("carry"),
+		]),
+		name: Type.Optional(Type.String({ description: "create: short kebab-case name for the new branch and directory. enter: an existing local or origin branch." })),
+		paths: Type.Optional(Type.Array(Type.String(), { description: "carry: paths changed in the main checkout to move into this worktree." })),
+		force: Type.Optional(Type.Boolean({ description: "remove: discard uncommitted changes." })),
 	});
+	const text = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: undefined });
 	pi.registerTool({
 		name: "worktree",
 		label: "Worktree",
 		description:
-			"Create a git worktree in .worktrees/<name> on a new branch from the default branch and move this session into it. The first edit or write does this automatically; call it first to choose the name, or before shell commands that write files.",
-		promptSnippet: "Create the session's git worktree (.worktrees/<name>) before changing files",
+			"Control this session's git worktree under .worktrees/. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, and those branches. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes and git commands in the main checkout are blocked until create or enter.",
+		promptSnippet: "Create, enter, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
 		parameters: worktreeParams,
 		exposure: "model-only",
 		async execute(_id, input: Static<typeof worktreeParams>, _signal, _onUpdate, ctx) {
-			if (worktree) return { content: [{ type: "text", text: `Already in ${worktree.path} (${worktree.branch}).` }], details: undefined };
-			if (!repo) return { content: [{ type: "text", text: "Not in a git repository; nothing to do." }], details: undefined };
-			if (repo.linked) return { content: [{ type: "text", text: `Already in linked worktree ${repo.root}.` }], details: undefined };
-			if (!repo.hasCommits) return { content: [{ type: "text", text: "The repository has no commits; work in it directly." }], details: undefined };
-			const note = await ensureWorktree(ctx, input.name);
-			return { content: [{ type: "text", text: note ?? "No worktree needed." }], details: undefined };
+			if (!repo) return text("Not in a git repository; nothing to do.");
+			if (repo.linked) return text(`The session started in linked worktree ${repo.root}; work in it directly.`);
+			if (!repo.hasCommits) return text("The repository has no commits; work in it directly.");
+			const { root } = repo;
+			switch (input.action) {
+				case "create":
+				case "enter": {
+					if (!input.name) throw new Error(`${input.action} needs a name.`);
+					const next = input.action === "create" ? await createWorktree(root, input.name) : await enterWorktree(root, input.name);
+					switchTo(ctx, next);
+					if (input.action === "create") await fastForwardMain(root, next.base);
+					return text(`Now in worktree ${next.path} on branch ${next.branch} (from ${next.base}). All paths resolve there; the main checkout stays untouched.`);
+				}
+				case "remove": {
+					if (!worktree) return text("No current worktree to remove.");
+					const refusal = await removeWorktree(root, worktree.path, input.force ?? false);
+					if (refusal) throw new Error(refusal);
+					const gone = worktree;
+					switchTo(ctx, undefined);
+					await fastForwardMain(root, await baseRef(root));
+					return text(`Removed ${gone.path}; branch ${gone.branch} is kept. Create or enter a worktree before the next write.`);
+				}
+				case "list": {
+					const rows = (await ownWorktrees(root)).map((w) => `${w.path === worktree?.path ? "* " : "  "}${w.path} ${w.branch ?? "(detached)"}`);
+					return text(rows.join("\n") || "No worktrees under .worktrees/.");
+				}
+				case "prune": {
+					const base = await baseRef(root);
+					const removed = await pruneWorktrees(root, base, worktree?.path);
+					await fastForwardMain(root, base);
+					return text(removed.length ? `Removed:\n${removed.join("\n")}` : "Nothing merged to prune.");
+				}
+				case "carry": {
+					if (!worktree) throw new Error("Create or enter a worktree first.");
+					if (!input.paths?.length) throw new Error("carry needs paths.");
+					const status = await carryChanges(root, worktree.path, input.paths.map((p) => p.replace(/^@/, "")));
+					return text(`Moved into ${worktree.path}:\n${status}`);
+				}
+			}
+			throw new Error(`Unknown action ${String(input.action)}.`);
 		},
 	});
 
 	pi.registerCommand("worktree", {
 		description: "Create the session's git worktree: /worktree <name>",
 		handler: async (args, ctx) => {
-			const note = await ensureWorktree(ctx, args.trim() || undefined);
-			ctx.ui.notify(note ?? (worktree ? `Already in ${worktree.path}` : "No worktree needed here"), "info");
+			if (!needsWorktree() || !repo) return ctx.ui.notify(worktree ? `Already in ${worktree.path}` : "No worktree needed here", "info");
+			switchTo(ctx, await createWorktree(repo.root, args.trim() || request || "work"));
 		},
 	});
 }
