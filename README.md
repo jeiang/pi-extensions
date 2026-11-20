@@ -11,6 +11,7 @@ Extensions for the [pi](https://github.com/earendil-works/pi) coding agent.
 | `lint` | Appends findings for lines an `edit`/`write` adds: history comments, `TODO`/`FIXME`, debug output. |
 | `emphasis` | Draws `[[Word]]` status pills and label icons in interactive replies and tells the model the vocabulary (adapted from [pi-emphasis](https://github.com/johnlindquist/pi-emphasis), MIT). |
 | `turn-time` | Elapsed time while the agent works; the last turn's time in the footer. |
+| `usage` | Subscription usage limits of OAuth logins (Claude 5h/7d and model-scoped weeklies, ChatGPT Codex windows) in the footer, refreshed at most once a minute after a run; `/usage` lists every window with its reset time. |
 | `github` | `run_watch` (CI jobs and steps until done, fail fast with the failed log tail) and `pr_view`. |
 | `images` | Draws a reply's ```` ```svg ```` blocks (rasterized by the `resvg` CLI on `PATH`) and linked local images below it, in interactive sessions. |
 | `loadout` | Leaves the tools named in `loadout.json` (`{"hidden": [...]}`) out of the model's tool list; they stay callable from codemode and findable with `searchTools()`. |
