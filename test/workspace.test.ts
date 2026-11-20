@@ -86,6 +86,40 @@ test("carry keeps the changes in the stash when they cannot apply in the worktre
 	assert.match(execFileSync("git", ["stash", "show", "--include-untracked", "-p"], { cwd: dir, encoding: "utf8" }), /\+main/);
 });
 
+test("carry with no changes leaves an existing stash alone", async () => {
+	const dir = repo();
+	const wt = await createWorktree(dir, "carry");
+	writeFileSync(join(dir, "README"), "user stash\n");
+	execFileSync("git", ["stash", "push", "-q"], { cwd: dir });
+	await assert.rejects(carryChanges(dir, wt.path, ["README"]), /No changes/);
+	assert.equal(readFileSync(join(wt.path, "README"), "utf8"), "hi\n");
+	assert.match(execFileSync("git", ["stash", "show", "-p"], { cwd: dir, encoding: "utf8" }), /\+user stash/);
+});
+
+test("a session removes its worktree, is blocked again, and enters or creates another", async () => {
+	const dir = repo();
+	const { session: s } = await session(dir, [
+		{ tool: "worktree", args: { action: "create", name: "first" } },
+		{ tool: "write", args: { path: "a.txt", content: "a\n" } },
+		{ tool: "bash", args: { command: "git add a.txt && git commit -qm a" } },
+		{ tool: "worktree", args: { action: "remove" } },
+		{ tool: "write", args: { path: "b.txt", content: "b\n" } },
+		{ tool: "worktree", args: { action: "enter", name: "first" } },
+		{ tool: "worktree", args: { action: "remove" } },
+		{ tool: "worktree", args: { action: "create", name: "second" } },
+		{ tool: "write", args: { path: "c.txt", content: "c\n" } },
+	]);
+	await s.prompt("go");
+	s.dispose();
+	const results = toolResults(s);
+	assert.match(results[4] ?? "", /worktree tool first/);
+	assert.match(results[5] ?? "", /Now in worktree .*first/);
+	assert.equal(existsSync(join(dir, ".worktrees", "first")), false);
+	assert.equal(readFileSync(join(dir, ".worktrees", "second", "c.txt"), "utf8"), "c\n");
+	assert.equal(execFileSync("git", ["show", "first:a.txt"], { cwd: dir, encoding: "utf8" }), "a\n");
+	assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }), "");
+});
+
 test("remove refuses a worktree with uncommitted changes and keeps the branch", async () => {
 	const dir = repo();
 	const wt = await createWorktree(dir, "rm");
@@ -98,7 +132,7 @@ test("remove refuses a worktree with uncommitted changes and keeps the branch", 
 	execFileSync("git", ["rev-parse", "--verify", "refs/heads/rm"], { cwd: dir });
 });
 
-test("prune removes merged worktrees only, never unused, unmerged, or dirty ones", async () => {
+test("prune removes merged worktrees only, never unused, unmerged, dirty, or nested ones", async () => {
 	const dir = repo();
 	const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 	const commit = (cwd: string, file: string) => {
@@ -114,10 +148,13 @@ test("prune removes merged worktrees only, never unused, unmerged, or dirty ones
 	commit(dirty.path, "d");
 	commit(unmerged.path, "u");
 	writeFileSync(join(dirty.path, "d"), "changed\n");
-	git(dir, "merge", "-q", "--no-ff", "-m", "merge", "merged", "dirty");
+	const nested = join(dir, ".worktrees", "project", "child");
+	git(dir, "worktree", "add", "-q", "-b", "pi-subagents/child", nested, "main");
+	commit(nested, "n");
+	git(dir, "merge", "-q", "--no-ff", "-m", "merge", "merged", "dirty", "pi-subagents/child");
 	const removed = await pruneWorktrees(dir, "main");
 	assert.deepEqual(removed, [`${merged.path} (merged)`]);
-	for (const kept of [dirty, unmerged, unused]) assert.equal(existsSync(kept.path), true);
+	for (const kept of [dirty.path, unmerged.path, unused.path, nested]) assert.equal(existsSync(kept), true);
 	assert.equal(git(dir, "branch", "--list", "merged"), "");
 });
 

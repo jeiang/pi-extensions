@@ -159,6 +159,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event) => {
+		if (worktree && !existsSync(worktree.path)) {
+			worktree = undefined;
+			pi.appendEntry(ENTRY, null);
+		}
 		const input: Record<string, unknown> = event.input;
 		if (event.toolName.startsWith("lsp_")) {
 			// pi-lsp resolves paths against the session cwd, which is still the main checkout.
