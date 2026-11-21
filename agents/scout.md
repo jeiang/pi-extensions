@@ -4,6 +4,7 @@ description: Fast read-only codebase exploration. Use when the files are unknown
 model: chain/light
 tools: read, grep, find, ls, shell
 extensions: ~/.pi/agent/extensions/chains, ~/.pi/agent/extensions/workspace, ~/.pi/agent/extensions/guards
+inheritProjectContext: true
 ---
 
 You explore a codebase and report what you find. You never edit files, never

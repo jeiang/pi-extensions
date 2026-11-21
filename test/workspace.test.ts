@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
 import { grepRoute } from "../extensions/workspace/shell.ts";
+import { childArgs, loadAgents } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -193,4 +194,21 @@ test("remapPath follows a symlinked alias of the checkout but not a symlinked fi
 	assert.equal(remapPath(join(base, "alias", "sub", "new.txt"), root, wt), join(wt, "sub", "new.txt"));
 	assert.equal(remapPath(join(root, "link"), root, wt), join(wt, "link"));
 	assert.equal(remapPath(join(base, "other.txt"), root, wt), join(base, "other.txt"));
+});
+
+test("subagent arguments keep the child to its agent's model, tools, and extensions", () => {
+	const dir = mkdtempSync(join(tmpdir(), "ws-agents-"));
+	writeFileSync(
+		join(dir, "scout.md"),
+		"---\nname: scout\ndescription: Finds code.\nmodel: chain/light\ntools: read, shell\nextensions: ~/x/chains, /abs/guards\ninheritProjectContext: false\n---\n\nYou explore.\n",
+	);
+	writeFileSync(join(dir, "plain.md"), "---\nname: plain\ndescription: No limits.\n---\n");
+	const [plain, scout] = loadAgents(dir);
+	assert.ok(plain && scout);
+	assert.deepEqual(childArgs(scout, "find it", "/s"), [
+		"--mode", "json", "-p", "--model", "chain/light", "--tools", "read,shell", "-ne", "-e", join(homedir(), "x/chains"), "-e", "/abs/guards",
+		"--append-system-prompt", "You explore.", "-nc", "--session-dir", "/s", "--", "find it",
+	]);
+	// An agent without a tool list must still not get the subagent tool.
+	assert.deepEqual(childArgs(plain, "t", undefined), ["--mode", "json", "-p", "--exclude-tools", "subagent", "-ne", "--no-session", "--", "t"]);
 });

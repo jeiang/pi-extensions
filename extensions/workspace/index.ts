@@ -17,6 +17,7 @@ import { setSessionDir } from "./cwd.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerShell } from "./shell.ts";
+import { registerSubagent } from "./subagent.ts";
 import {
 	baseRef,
 	carryChanges,
@@ -133,6 +134,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	registerShell(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
+	registerSubagent(pi, { cwd, env });
 
 	pi.on("user_bash", async (event) => {
 		const local = createLocalBashOperations();
@@ -173,22 +175,6 @@ export default function (pi: ExtensionAPI) {
 				const value = input[key];
 				if (typeof value === "string" && !value.includes("://")) input[key] = resolve(worktree.path, String(remap(value)));
 			}
-			return;
-		}
-		if (event.toolName === "subagent") {
-			// pi-subagents defaults a child's cwd to the session cwd, which is still the main checkout.
-			if (!worktree || input.action !== undefined || input.machine !== undefined) return;
-			const dir = worktree.path;
-			const place = (item: Record<string, unknown>) => {
-				if (typeof item.cwd === "string") item.cwd = resolve(dir, String(remap(item.cwd)));
-				for (const key of ["tasks", "chain", "parallel"]) {
-					const list = item[key];
-					if (Array.isArray(list)) for (const child of list) if (child && typeof child === "object") place(child as Record<string, unknown>);
-				}
-			};
-			place(input);
-			if (input.args && typeof input.args === "object") place(input.args as Record<string, unknown>);
-			input.cwd ??= dir;
 			return;
 		}
 		if (event.toolName === "edit" || event.toolName === "write") {

@@ -61,11 +61,8 @@ a pull request, merge, or deploy only when authorized.
 Before your first write in a main checkout, call `worktree` with action
 `create` (or `enter` for an existing branch); writes there are blocked until
 then. When the user edits a file in the main checkout for you, such as a sops
-secret, move it in with `carry`. Subagents that edit files in parallel each
-get one: commit first (the checkout must be clean), then launch them with
-`worktree: true`. Each child commits on its own branch; merge the branches
-you keep. Once a branch merges, call `worktree` with action `prune` to
-delete its merged worktrees and branches.
+secret, move it in with `carry`. Once a branch merges, call `worktree` with
+action `prune` to delete its merged worktrees and branches.
 
 ## Tools
 
@@ -73,6 +70,12 @@ delete its merged worktrees and branches.
 filters large output before you see it. Do not write a script as a heredoc
 or `-c` string in `shell`: use `codemode`, or write a script file when the
 script will be run again.
+
+Delegate only to save context: `scout` to find code you cannot locate in
+two searches, `researcher` for a question that needs web sources or
+judgment, `change-reviewer` once on a finished branch before a pull
+request. Children never edit files. Put the paths and facts you have in
+the task.
 
 ## Communication
 
