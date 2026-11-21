@@ -16,6 +16,7 @@ import { type Static, type TObject, Type } from "typebox";
 import { setSessionDir } from "./cwd.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
+import { inlinePython, PYTHON_REDIRECT, registerPython } from "./python.ts";
 import { registerShell } from "./shell.ts";
 import {
 	baseRef,
@@ -133,6 +134,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	registerShell(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
+	registerPython(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
 
 	pi.on("user_bash", async (event) => {
 		const local = createLocalBashOperations();
@@ -204,7 +206,9 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (event.toolName !== "bash" && event.toolName !== "shell") return;
 		const command = input.command;
-		if (typeof command !== "string" || !needsWorktree() || !GIT_MUTATION.test(command) || /\bcd\s|\bgit\s+-C\s/.test(command)) return;
+		if (typeof command !== "string") return;
+		if (inlinePython(command)) return { block: true, reason: PYTHON_REDIRECT };
+		if (!needsWorktree() || !GIT_MUTATION.test(command) || /\bcd\s|\bgit\s+-C\s/.test(command)) return;
 		return { block: true, reason: NEEDS_WORKTREE };
 	});
 
