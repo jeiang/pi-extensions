@@ -1,6 +1,7 @@
 // Draws icons on report labels and links in assistant replies.
 // Adapted from github.com/johnlindquist/pi-emphasis, MIT, Copyright (c) 2026 John Lindquist.
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { chartTables } from "./chart.ts";
 
 // The labels of a final report, named in the Communication section of prompts/AGENTS.md.
 const LABELS: Record<string, string> = {
@@ -57,5 +58,6 @@ export default function emphasis(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     theme = ctx.mode === "tui" ? ctx.ui.theme : undefined;
   });
-  pi.registerMarkdownTransformer((markdown, context) => (theme && context.messageType === "assistant" ? decorate(markdown, theme) : markdown));
+  // An extension has one transformer. The chart reads the table before the icons and colors are added.
+  pi.registerMarkdownTransformer((markdown) => (theme ? decorate(chartTables(markdown), theme) : markdown), { messageTypes: ["assistant"] });
 }

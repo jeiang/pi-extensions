@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { grepRoute } from "../extensions/workspace/shell.ts";
+import { grepRoute, progressBar } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
@@ -211,4 +211,26 @@ test("subagent arguments keep the child to its agent's model, tools, and extensi
 	]);
 	// An agent without a tool list must still not get the subagent tool.
 	assert.deepEqual(childArgs(plain, "t", undefined), ["--mode", "json", "-p", "--exclude-tools", "subagent", "-ne", "--no-session", "--", "t"]);
+});
+
+test("progressBar reads build steps and percentages", () => {
+	assert.equal(progressBar("[3/12] Compiling foo"), `${"█".repeat(6)}${"░".repeat(18)} 25%`);
+	assert.equal(progressBar("copied 3 of 4 files"), `${"█".repeat(18)}${"░".repeat(6)} 75%`);
+	assert.equal(progressBar("  45% 1.2MB/s"), `${"█".repeat(11)}${"░".repeat(13)} 45%`);
+	assert.equal(progressBar("exit 250%"), undefined);
+	assert.equal(progressBar("plain line"), undefined);
+});
+
+test("a carriage-return progress line updates in place in the live view", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "ws-live-"));
+	const { session: s } = await session(dir, [{ tool: "shell", args: { command: "printf 'start\\n10%%\\r50%%\\r'; sleep 0.3; printf '100%%\\ndone\\n'" } }]);
+	const views: string[] = [];
+	s.subscribe((event) => {
+		if (event.type === "tool_execution_update") views.push(event.partialResult.content[0]?.text ?? "");
+	});
+	await s.prompt("run");
+	s.dispose();
+	assert.equal(views.at(-1), "start\n100%\ndone");
+	assert.ok(views.some((view) => view.startsWith("start\n50%\n█")), views.join("\n---\n"));
+	assert.match(toolResults(s)[0] ?? "", /10%\r50%\r100%\ndone/);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatFooter, parseAnthropic, parseCodex } from "../extensions/usage/index.ts";
+import { chartLines, parseAnthropic, parseCodex } from "../extensions/usage/index.ts";
 
 test("parses Anthropic limits, marking model-scoped ones", () => {
 	const windows = parseAnthropic({
@@ -40,11 +40,20 @@ test("ignores malformed payloads", () => {
 	}
 });
 
-test("footer leaves out errors and scoped windows", () => {
-	const footer = formatFooter([
-		{ name: "claude", windows: [{ label: "5h", percent: 14.4 }, { label: "7d Fable", percent: 35, scoped: true }] },
-		{ name: "codex", error: "HTTP 401" },
+test("the chart draws one bar per window, colored by how much is used", () => {
+	const now = 1_000_000;
+	const lines = chartLines(
+		[
+			{ name: "claude", windows: [{ label: "5h", percent: 50, resetsAt: now + 90 * 60_000 }, { label: "7d Fable", percent: 100, scoped: true }] },
+			{ name: "codex", error: "HTTP 401" },
+		],
+		now,
+		(level, text) => `<${level}>${text}`,
+	);
+	assert.deepEqual(lines, [
+		"claude",
+		`  5h         <warning>${"█".repeat(12)}${"░".repeat(12)}  50% used  50% left  resets in 1h30m`,
+		`  7d Fable   <error>${"█".repeat(24)} 100% used   0% left`,
+		"codex: HTTP 401",
 	]);
-	assert.equal(footer, "claude 5h 14%");
-	assert.equal(formatFooter([{ name: "codex", error: "HTTP 401" }]), undefined);
 });

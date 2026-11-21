@@ -143,7 +143,8 @@ export function createAdvisor(config: AdvisorConfig) {
 		});
 
 		pi.registerMessageRenderer<undefined>("advisor", (message, { expanded }, theme) =>
-			card("Advisor", typeof message.content === "string" ? message.content.replace(/^Advisor:\n/, "") : "", expanded, theme),
+			// The card shows the points; the instruction that follows them is for the agent.
+			card("Advisor", typeof message.content === "string" ? message.content.replace(/^Advisor:\n/, "").replace(`\n\n${RESTATE}`, "") : "", expanded, theme),
 		);
 		pi.registerEntryRenderer<string>("advisor-nits", (entry, { expanded }, theme) => card("Advisor nits", entry.data ?? "", expanded, theme));
 
