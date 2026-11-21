@@ -25,7 +25,7 @@
           runHook preInstall
           npm prune --omit=dev
           mkdir -p $out
-          cp -r extensions prompts agents skills package.json /
+          cp -r extensions prompts agents skills package.json $out/
           if [ -d node_modules ]; then cp -r node_modules $out/; fi
           # pi-lens skips files its project .gitignore covers, so it never analyzed the session's
           # .worktrees/<name> checkout (workspace extension); treat such files as their own project.
