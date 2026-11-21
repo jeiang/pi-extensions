@@ -236,7 +236,7 @@ export default function (pi: ExtensionAPI) {
 		name: "worktree",
 		label: "Worktree",
 		description:
-			"Control this session's git worktree under .worktrees/. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, and those branches. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes and git commands in the main checkout are blocked until create or enter.",
+			"Control this session's git worktree under .worktrees/. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, the current one included, and those branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes and git commands in the main checkout are blocked until create or enter.",
 		promptSnippet: "Create, enter, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
 		parameters: worktreeParams,
 		exposure: "model-only",
@@ -269,7 +269,8 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "prune": {
 					const base = await baseRef(root);
-					const removed = await pruneWorktrees(root, base, worktree?.path);
+					const removed = await pruneWorktrees(root, base);
+					if (worktree && !existsSync(worktree.path)) switchTo(ctx, undefined);
 					await fastForwardMain(root, base);
 					return text(removed.length ? `Removed:\n${removed.join("\n")}` : "Nothing merged to prune.");
 				}

@@ -153,12 +153,12 @@ export async function removeWorktree(root: string, path: string, force: boolean)
 }
 
 /** Removes clean worktrees, and their branches, whose work is merged into `base`. */
-export async function pruneWorktrees(root: string, base: string, keep?: string): Promise<string[]> {
+export async function pruneWorktrees(root: string, base: string): Promise<string[]> {
 	// main merges pull requests with merge commits, so an unused branch sits on its first-parent line and merged work does not.
 	const mainline = new Set((await git(root, "rev-list", "--first-parent", base)).split("\n"));
 	const removed: string[] = [];
 	for (const w of await ownWorktrees(root)) {
-		if (!w.branch || w.path === keep) continue;
+		if (!w.branch) continue;
 		const tip = await tryGit(root, "rev-parse", w.branch);
 		if (!tip || mainline.has(tip) || (await tryGit(root, "merge-base", "--is-ancestor", tip, base)) === undefined) continue;
 		if ((await tryGit(w.path, "status", "--porcelain")) !== "") continue;
