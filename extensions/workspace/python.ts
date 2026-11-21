@@ -8,9 +8,10 @@ const RUNNER = readFileSync(new URL("./runner.py", import.meta.url), "utf8");
 const DONE = "\x00pi-python-done";
 const DEFAULT_TIMEOUT_S = 120;
 const INTERRUPT_GRACE_MS = 5_000;
+const MAX_OUTPUT = 4 * 1024 * 1024;
 
 export const PYTHON_REDIRECT =
-	"Inline Python runs in the `python` tool: a persistent kernel in the repository's devshell that keeps imports and variables between calls (shell out with subprocess when needed). Running a script file (`python path/to/script.py`) or a module (`python -m pkg`) stays allowed in the shell.";
+	"Inline Python runs in the `python` tool: a persistent kernel in the repository's devshell that keeps imports and variables between calls (its stdin is closed, so read input from files, or run a command with subprocess). Running a script file (`python path/to/script.py`) or a module (`python -m pkg`) stays allowed in the shell.";
 
 // A python interpreter at command position: line start, after a separator, or after a wrapper such as `uv run` or `nix develop -c`/`bash -c '`.
 const PYTHON_CALL =
@@ -25,7 +26,8 @@ export function inlinePython(command: string): boolean {
 		while (tokens[i]?.startsWith("-") && !["-c", "-m", "-"].includes(tokens[i] ?? "")) i += VALUE_FLAGS.has(tokens[i] ?? "") ? 2 : 1;
 		const first = tokens[i];
 		if (first === "-m") continue;
-		if (first === undefined || first === "-c" || first === "-" || first.startsWith("<")) return true;
+		// A bare interpreter reads stdin; one with only flags (`--version`) does not.
+		if ((first === undefined && tokens.length === 0) || first === "-c" || first === "-" || first?.startsWith("<")) return true;
 	}
 	return false;
 }
@@ -58,11 +60,20 @@ export function registerPython(pi: ExtensionAPI, options: PythonOptions) {
 	let kernel: Kernel | undefined;
 	let queue: Promise<unknown> = Promise.resolve();
 
+	const signalGroup = (child: ChildProcessWithoutNullStreams, sig: NodeJS.Signals) => {
+		// The kernel leads its own process group, so subprocesses a cell started get the signal too.
+		try {
+			if (child.pid) process.kill(-child.pid, sig);
+		} catch {
+			child.kill(sig);
+		}
+	};
+
 	const stop = async () => {
 		const current = kernel;
 		kernel = undefined;
 		if (!current) return;
-		current.child.kill("SIGKILL");
+		signalGroup(current.child, "SIGKILL");
 		await current.exited;
 	};
 
@@ -70,9 +81,12 @@ export function registerPython(pi: ExtensionAPI, options: PythonOptions) {
 		const env = await options.env(cwd);
 		const venv = join(cwd, ".venv", "bin", "python");
 		const python = existsSync(venv) ? venv : "python3";
-		const child = spawn(python, ["-u", "-c", RUNNER], { cwd, env: { ...env, PYTHONUNBUFFERED: "1" }, stdio: "pipe" });
+		const child = spawn(python, ["-u", "-c", RUNNER], { cwd, env: { ...env, PYTHONUNBUFFERED: "1" }, stdio: "pipe", detached: true });
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		// `exit`, not `close`: a subprocess the cell left running can hold the pipes open.
 		const exited = new Promise<void>((resolve) => {
-			child.once("close", () => resolve());
+			child.once("exit", () => resolve());
 			child.once("error", () => resolve());
 		});
 		const started: Kernel = { cwd, child, exited };
@@ -82,29 +96,33 @@ export function registerPython(pi: ExtensionAPI, options: PythonOptions) {
 		return started;
 	};
 
+	let cells = 0;
 	const execute = async (kernelNow: Kernel, code: string, timeoutS: number, signal: AbortSignal | undefined) => {
 		const { child } = kernelNow;
+		const id = String(++cells);
+		const marker = `\n${DONE} ${id}`;
 		let output = "";
 		const done = { stdout: false, stderr: false };
 		let ok = false;
 		const { promise, resolve } = Promise.withResolvers<"done" | "exit">();
 		const pending = { stdout: "", stderr: "" };
-		const onData = (stream: "stdout" | "stderr") => (chunk: Buffer) => {
-			pending[stream] += chunk.toString("utf8");
-			const at = pending[stream].indexOf(`\n${DONE}`);
-			if (at === -1) {
+		const append = (value: string) => {
+			output = (output + value).slice(-MAX_OUTPUT);
+		};
+		const onData = (stream: "stdout" | "stderr") => (chunk: string) => {
+			if (done[stream]) return;
+			pending[stream] += chunk;
+			const at = pending[stream].indexOf(marker);
+			const end = at === -1 ? -1 : pending[stream].indexOf("\n", at + 1);
+			if (end === -1) {
 				// Keep a tail that may hold the start of a split marker.
-				const keep = DONE.length + 1;
-				if (pending[stream].length > keep) {
-					output += pending[stream].slice(0, -keep);
-					pending[stream] = pending[stream].slice(-keep);
-				}
+				const keep = at === -1 ? marker.length : pending[stream].length - at;
+				append(pending[stream].slice(0, -keep || undefined));
+				pending[stream] = pending[stream].slice(-keep);
 				return;
 			}
-			const end = pending[stream].indexOf("\n", at + 1);
-			if (end === -1) return;
-			output += pending[stream].slice(0, at);
-			if (stream === "stdout") ok = (JSON.parse(pending[stream].slice(at + 1 + DONE.length, end).trim() || "{}") as { ok?: boolean }).ok === true;
+			append(pending[stream].slice(0, at));
+			if (stream === "stdout") ok = (JSON.parse(pending[stream].slice(at + marker.length, end).trim() || "{}") as { ok?: boolean }).ok === true;
 			pending[stream] = "";
 			done[stream] = true;
 			if (done.stdout && done.stderr) resolve("done");
@@ -116,25 +134,25 @@ export function registerPython(pi: ExtensionAPI, options: PythonOptions) {
 		void kernelNow.exited.then(() => resolve("exit"));
 
 		let interrupted = "";
+		let escalation: NodeJS.Timeout | undefined;
 		const interrupt = (why: string) => {
 			if (interrupted) return;
 			interrupted = why;
-			child.kill("SIGINT");
-			setTimeout(() => {
-				if (!done.stdout || !done.stderr) child.kill("SIGKILL");
-			}, INTERRUPT_GRACE_MS).unref();
+			signalGroup(child, "SIGINT");
+			escalation = setTimeout(() => signalGroup(child, "SIGKILL"), INTERRUPT_GRACE_MS);
 		};
 		const timer = setTimeout(() => interrupt(`Interrupted after ${timeoutS}s.`), timeoutS * 1000);
 		const onAbort = () => interrupt("Cancelled.");
 		signal?.addEventListener("abort", onAbort, { once: true });
 
-		child.stdin.write(`${JSON.stringify({ code })}\n`);
+		child.stdin.write(`${JSON.stringify({ id, code })}\n`);
 		const why = await promise;
 		clearTimeout(timer);
+		clearTimeout(escalation);
 		signal?.removeEventListener("abort", onAbort);
 		child.stdout.off("data", onStdout);
 		child.stderr.off("data", onStderr);
-		output += pending.stdout + pending.stderr;
+		append(pending.stdout + pending.stderr);
 		const notes = [interrupted, why === "exit" ? `The kernel exited (code ${child.exitCode ?? child.signalCode}); its state is gone and the next call starts a fresh one.` : ""];
 		return { output, ok: ok && why === "done" && !interrupted, notes: notes.filter(Boolean) };
 	};

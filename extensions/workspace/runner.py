@@ -1,10 +1,11 @@
 # Persistent Python kernel for the workspace extension's `python` tool.
-# Requests arrive as JSON lines on a private copy of stdin; each cell ends with DONE on stdout and stderr.
+# Requests arrive as JSON lines on a private copy of stdin; each cell ends with DONE <id> on stdout and stderr.
 import ast
 import asyncio
 import inspect
 import json
 import os
+import signal
 import sys
 import traceback
 
@@ -37,17 +38,23 @@ def cell(source):
             print(repr(value))
 
 
+# An interrupt that lands between cells must not kill the kernel.
+signal.signal(signal.SIGINT, signal.SIG_IGN)
 for line in control:
+    request = json.loads(line)
     ok = True
     try:
-        cell(json.loads(line)["code"])
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        cell(request["code"])
     except BaseException as error:
         ok = False
         if isinstance(error, SystemExit):
             print(f"SystemExit({error.code!r}) caught; the kernel keeps running.", file=sys.stderr)
         else:
             traceback.print_exc()
-    sys.stderr.write(f"\n{DONE}\n")
-    sys.stderr.flush()
-    sys.stdout.write(f"\n{DONE} {json.dumps({'ok': ok})}\n")
-    sys.stdout.flush()
+    finally:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        sys.stderr.write(f"\n{DONE} {request['id']}\n")
+        sys.stderr.flush()
+        sys.stdout.write(f"\n{DONE} {request['id']} {json.dumps({'ok': ok})}\n")
+        sys.stdout.flush()

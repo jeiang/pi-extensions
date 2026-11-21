@@ -206,6 +206,7 @@ test("inlinePython blocks inline code and bare interpreters, not scripts or modu
 		"uv run python scripts/gen.py",
 		"python3 \"$SCRIPT\" --flag",
 		"which python3",
+		"python3 --version",
 		"echo python -c",
 		"nix shell nixpkgs#python3 -c true",
 		"git commit -m 'python -c fix'",
@@ -220,18 +221,22 @@ test("the python kernel keeps state between calls, survives errors, and interrup
 		{ tool: "python", args: { code: "x + 1" } },
 		{ tool: "python", args: { code: "1/0" } },
 		{ tool: "python", args: { code: "import time\ntime.sleep(30)", timeout: 1 } },
+		{ tool: "python", args: { code: "import subprocess\nsubprocess.run(['sleep', '30'])", timeout: 1 } },
 		{ tool: "python", args: { code: "os.system('echo from-child'); x" } },
 		{ tool: "shell", args: { command: "python3 -c 'print(1)'" } },
 	]);
+	const started = Date.now();
 	await s.prompt("compute");
 	s.dispose();
-	const [first, second, third, fourth, fifth, sixth] = toolResults(s);
+	const [first, second, third, fourth, fifth, sixth, seventh] = toolResults(s);
 	assert.equal(first, "hi");
 	assert.equal(second, "42");
 	assert.match(third ?? "", /ZeroDivisionError/);
 	assert.match(fourth ?? "", /KeyboardInterrupt[\s\S]*Interrupted after 1s/);
-	assert.match(fifth ?? "", /from-child[\s\S]*41/);
-	assert.match(sixth ?? "", /persistent kernel/);
+	assert.match(fifth ?? "", /Interrupted after 1s/);
+	assert.match(sixth ?? "", /from-child[\s\S]*41/);
+	assert.match(seventh ?? "", /persistent kernel/);
+	assert.ok(Date.now() - started < 10_000);
 });
 
 test("remapPath follows a symlinked alias of the checkout but not a symlinked file inside it", () => {
