@@ -30,7 +30,7 @@ export const COMMAND_RULES: Rule[] = [
 	{ pattern: /\bgit\s+push\b[^|;&]*\s(-f\b|--force\b|--force-with-lease\b|\+\S)/, reason: HISTORY },
 ];
 
-const RESTRICTED = ["~/.ssh", "~/.gnupg", "~/.config/sops", "~/Library", "/etc"];
+const RESTRICTED = ["~/.ssh", "~/.gnupg", "~/.config/sops", "/etc"];
 
 const SECRETS: RegExp[] = [
 	/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
