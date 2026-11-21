@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { inlinePython } from "../extensions/workspace/python.ts";
 import { grepRoute } from "../extensions/workspace/shell.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
@@ -182,61 +181,6 @@ test("grepRoute serves plain rg and grep calls only", () => {
 	assert.equal(grepRoute("grep foo"), undefined);
 	assert.equal(grepRoute("rg --json foo"), undefined);
 	assert.equal(grepRoute("rg $PAT"), undefined);
-});
-
-test("inlinePython blocks inline code and bare interpreters, not scripts or modules", () => {
-	for (const command of [
-		"python3 -c 'print(1)'",
-		"python -u -c 'print(1)'",
-		"python3 - <<'EOF'\nprint(1)\nEOF",
-		"python3 <<EOF\nprint(1)\nEOF",
-		"curl -s x | python3 -c 'import json'",
-		"cat data | python3",
-		"cd src && uv run python -c 'import x'",
-		"nix develop -c python3 -c 'print(1)'",
-		"/usr/bin/python3.12 -c 1",
-		"ssh host bash -c 'python3 -c 1'",
-		"python3",
-	])
-		assert.equal(inlinePython(command), true, command);
-	for (const command of [
-		"python3 android/tools/livery_fixture.py --out x",
-		"python -X dev script.py",
-		"python3 -m pytest -q",
-		"uv run python scripts/gen.py",
-		"python3 \"$SCRIPT\" --flag",
-		"which python3",
-		"python3 --version",
-		"echo python -c",
-		"nix shell nixpkgs#python3 -c true",
-		"git commit -m 'python -c fix'",
-	])
-		assert.equal(inlinePython(command), false, command);
-});
-
-test("the python kernel keeps state between calls, survives errors, and interrupts on timeout", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "ws-python-"));
-	const { session: s } = await session(dir, [
-		{ tool: "python", args: { code: "import os\nx = 41\nprint('hi')" } },
-		{ tool: "python", args: { code: "x + 1" } },
-		{ tool: "python", args: { code: "1/0" } },
-		{ tool: "python", args: { code: "import time\ntime.sleep(30)", timeout: 1 } },
-		{ tool: "python", args: { code: "import subprocess\nsubprocess.run(['sleep', '30'])", timeout: 1 } },
-		{ tool: "python", args: { code: "os.system('echo from-child'); x" } },
-		{ tool: "shell", args: { command: "python3 -c 'print(1)'" } },
-	]);
-	const started = Date.now();
-	await s.prompt("compute");
-	s.dispose();
-	const [first, second, third, fourth, fifth, sixth, seventh] = toolResults(s);
-	assert.equal(first, "hi");
-	assert.equal(second, "42");
-	assert.match(third ?? "", /ZeroDivisionError/);
-	assert.match(fourth ?? "", /KeyboardInterrupt[\s\S]*Interrupted after 1s/);
-	assert.match(fifth ?? "", /Interrupted after 1s/);
-	assert.match(sixth ?? "", /from-child[\s\S]*41/);
-	assert.match(seventh ?? "", /persistent kernel/);
-	assert.ok(Date.now() - started < 10_000);
 });
 
 test("remapPath follows a symlinked alias of the checkout but not a symlinked file inside it", () => {

@@ -67,6 +67,13 @@ get one: commit first (the checkout must be clean), then launch them with
 you keep. Once a branch merges, call `worktree` with action `prune` to
 delete its merged worktrees and branches.
 
+## Tools
+
+`shell` runs one process. `codemode` runs several tool calls in one step or
+filters large output before you see it. Do not write a script as a heredoc
+or `-c` string in `shell`: use `codemode`, or write a script file when the
+script will be run again.
+
 ## Communication
 
 Technical and concise. No preamble, wrap-up, filler, flattery, or apology.
