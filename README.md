@@ -21,6 +21,11 @@ The package also bundles the third-party pi packages the setup loads, so one
 lock file pins them: `pi-lens`, `@ian-pascoe/pi-lsp`, and `pi-web-access`,
 under `node_modules/`.
 
+It also carries the text pi reads, so a tool and the prompt that describes it
+change in one commit: `prompts/AGENTS.md` (the global instructions),
+`agents/` (subagent definitions), and `skills/devshell-preflight/`. The
+other skills come from agent-skills.
+
 ## chains
 
 Reads `chains.json` from the agent directory (or `PI_CHAINS_CONFIG`):
