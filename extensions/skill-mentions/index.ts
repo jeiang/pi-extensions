@@ -6,7 +6,10 @@ import { fuzzyFilter } from "@earendil-works/pi-tui";
 const PREFIX = "skill:";
 // pi's editor refuses "/" as a provider trigger character, so the menu opens on "$".
 const TRIGGER = /(?:^|\s)\$([^\s$]*)$/;
-const TOKEN = /(^|\s)\/skill:(\S+)(?=\s|$)/g;
+// A name ends before trailing punctuation, so `(/skill:zig).` loads zig; `/skill:zig/x` is a path.
+const TOKEN = /(^|[\s([{"'`])\/skill:([\w-]+(?:\.[\w-]+)*)(?![\w/-]|\.[\w-])/g;
+// pi draws only a user message's first skill block as a skill; the rest stay in the message text.
+const BLOCK = /<skill name="([^"]+)" location="[^"]*">\n[\s\S]*?\n<\/skill>/g;
 
 // Same block as pi's leading `/skill:name` expansion, so the transcript renders it as a skill.
 function skillBlock(skill: SlashCommandInfo): string {
@@ -18,6 +21,8 @@ function skillBlock(skill: SlashCommandInfo): string {
 /** Skills mid-prompt: `$` opens a menu that inserts `/skill:name`, and every `/skill:name` in a prompt loads that skill. */
 export default function (pi: ExtensionAPI) {
 	const skills = () => pi.getCommands().filter((command) => command.source === "skill");
+
+	pi.registerMarkdownTransformer((markdown) => markdown.replace(BLOCK, "`[skill] $1`"), { messageTypes: ["user"] });
 
 	pi.on("session_start", (_event, ctx) => {
 		ctx.ui.addAutocompleteProvider((current) => ({
@@ -48,6 +53,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("input", (event, ctx) => {
+		// Like pi's own expansion, which skips `sendUserMessage` text by default.
+		if (event.source === "extension") return;
 		const text = event.text.trimStart();
 		// Another slash command owns its arguments; "!" runs a shell command.
 		if ((text.startsWith("/") && !text.startsWith("/skill:")) || text.startsWith("!")) return;
