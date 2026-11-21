@@ -130,13 +130,16 @@ export default function (pi: ExtensionAPI) {
 		recount(ctx);
 		refreshGit(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			requestRender = () => tui.requestRender();
-			usageShared().onChange = requestRender;
+			const render = () => tui.requestRender();
+			requestRender = render;
+			usageShared().onChange = render;
 			const unsubscribe = footerData.onBranchChange(() => refreshGit(ctx));
 			let last: string[] = [];
 			return {
 				dispose() {
 					unsubscribe();
+					// A new session's footer can be installed before this one is disposed.
+					if (requestRender !== render) return;
 					requestRender = undefined;
 					usageShared().onChange = undefined;
 				},
