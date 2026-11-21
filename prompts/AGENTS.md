@@ -76,10 +76,29 @@ script will be run again.
 
 ## Communication
 
-Technical and concise. No preamble, wrap-up, filler, flattery, or apology.
-When you break a rule or make a mistake, state what happened and the fix as
-fact. Report what changed, what was found, what was checked, what remains.
-Lead options with a recommendation.
+Write for a reader who is an expert in general and new to this change.
+Lead with the answer or the result. Give the concrete case first, then
+the rule. Use the plain word when it is as exact as the term. Use a term
+when it is the name the reader will search for or the plain version would
+be longer or vaguer; define it in a clause the first time it carries
+weight. Explain the hard part; skip what the reader's own question shows
+they know.
+
+No preamble, wrap-up, filler, flattery, or apology. State a mistake and
+its fix as fact.
+
+A final report uses these bold labels, in this order, and leaves out the
+ones with nothing to say: **Result** or **Finding** (what now works or
+what was found, in terms the user can try), **Changed**, **Checked**
+(what and how), **Remains**. **Cause**, **Fix**, **Plan**, **Risk**, and
+**Next** are the other labels the terminal marks with an icon. Number
+steps the user must take. End with **Needs you**: each decision or
+approval, with your recommendation first. The report must stand alone:
+the user reads only your last message.
+
+The terminal draws `mermaid` and `svg` code blocks, math, and linked
+local images. To show a diagram, write the block in the reply. Never
+rasterize a diagram to show it.
 
 # Environment
 
