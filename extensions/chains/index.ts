@@ -7,8 +7,6 @@ export const CHAIN_PROVIDER = "chain";
 
 export interface ChainConfig {
 	name?: string;
-	/** Context tokens at which the extension compacts a session on this chain. */
-	compactAt?: number;
 	/** `provider/model` with an optional `:level` suffix, in fallback order. */
 	targets: string[];
 }
@@ -85,7 +83,6 @@ export function createChains(config: ChainsConfig) {
 	return (pi: ExtensionAPI) => {
 		let lastError: { provider: string; message: string } | undefined;
 		let fallbacks = 0;
-		let compacting = false;
 
 		const activeChain = (ctx: ExtensionContext) =>
 			ctx.model?.provider === CHAIN_PROVIDER ? chains.get(ctx.model.id) : undefined;
@@ -151,25 +148,6 @@ export function createChains(config: ChainsConfig) {
 				continue: true,
 				entries: [{ type: "custom_message", customType: "chain-fallback", content: FALLBACK_NOTE, display: false }],
 			};
-		});
-
-		// ctx.compact aborts a running agent, so it waits for the run to settle. A print-mode process exits there.
-		pi.on("agent_settled", (_event, ctx) => {
-			const compactAt = activeChain(ctx)?.compactAt;
-			const tokens = ctx.getContextUsage()?.tokens;
-			if (!ctx.hasUI || !compactAt || compacting || tokens == null || tokens <= compactAt) return;
-			compacting = true;
-			// The callbacks can run after the session is replaced, when reading ctx throws.
-			const { ui } = ctx;
-			ctx.compact({
-				onComplete: () => {
-					compacting = false;
-				},
-				onError: (error) => {
-					compacting = false;
-					ui.notify(`Compaction failed: ${error.message}`, "error");
-				},
-			});
 		});
 
 		pi.registerCommand("chain-reset", {

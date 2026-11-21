@@ -20,11 +20,11 @@ const echoTool = (pi: ExtensionAPI) => {
 	});
 };
 
-async function run(script: Script, chain: string[] = ["p1/m:high", "p2/m:low", "p3/m"], compactAt?: number) {
+async function run(script: Script, chain: string[] = ["p1/m:high", "p2/m:low", "p3/m"]) {
 	const calls: Call[] = [];
 	const cooldownFile = join(mkdtempSync(join(tmpdir(), "chains-")), "cooldown.json");
 	const { session } = await createTestSession({
-		extensions: [scriptedProviders(script, calls), echoTool, createChains({ chains: { test: { targets: chain, compactAt } }, cooldownFile })],
+		extensions: [scriptedProviders(script, calls), echoTool, createChains({ chains: { test: { targets: chain } }, cooldownFile })],
 		model: ["chain", "test"],
 	});
 	await session.prompt("go");
@@ -85,9 +85,4 @@ test("usage-limit fallbacks stop after the last target", async () => {
 		calls.map((c) => c.model),
 		["p1/m", "p2/m"],
 	);
-});
-
-test("a run above compactAt is not aborted between turns", async () => {
-	const { text } = await run((_model, _context, index) => (index === 0 ? { tool: "echo", args: {} } : { text: "done" }), ["p1/m"], 1);
-	assert.equal(text, "done");
 });
