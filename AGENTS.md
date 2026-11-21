@@ -4,6 +4,9 @@ Extensions for pi (`@earendil-works/pi-coding-agent`), one directory per
 extension under `extensions/`, each with an `index.ts` default export. pi
 loads the TypeScript directly; there is no build step. cornn-flaek consumes
 this flake's `packages.default` and lists the extensions in pi's settings.
+`prompts/AGENTS.md` is pi's global instruction file, `agents/` holds the
+subagent definitions, and `skills/` the skills written for pi; cornn-flaek
+links all three into `~/.pi/agent`.
 
 - Check: `nix develop -c npm run check` (typecheck and tests). `nix build`
   runs the same check.

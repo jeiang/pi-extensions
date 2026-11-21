@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
 export interface UsageWindow {
 	label: string;
@@ -95,14 +96,20 @@ async function fetchReports(ctx: ExtensionContext): Promise<Report[]> {
 	return reports.filter((report) => report !== undefined);
 }
 
-export function formatFooter(reports: Report[]): string | undefined {
-	const parts = reports.flatMap((report) => {
-		if (!("windows" in report)) return [];
-		const windows = report.windows.filter((window) => !window.scoped);
-		if (windows.length === 0) return [];
-		return [`${report.name} ${windows.map((window) => `${window.label} ${Math.round(window.percent)}%`).join(" · ")}`];
-	});
-	return parts.length > 0 ? parts.join(" │ ") : undefined;
+// pi loads each extension separately, so the footer extension reads the reports from here.
+const KEY = Symbol.for("pi-extensions.usage");
+interface Shared {
+	reports: Report[];
+	onChange?: () => void;
+}
+const store = globalThis as typeof globalThis & { [KEY]?: Shared };
+export const usageShared = (): Shared => (store[KEY] ??= { reports: [] });
+
+export type UsageLevel = "success" | "warning" | "error";
+const BAR_CELLS = 24;
+
+export function usageLevel(percent: number): UsageLevel {
+	return percent >= 80 ? "error" : percent >= 50 ? "warning" : "success";
 }
 
 function formatReset(resetsAt: number, now: number): string {
@@ -113,22 +120,28 @@ function formatReset(resetsAt: number, now: number): string {
 	return `${Math.floor(hours / 24)}d${String(hours % 24).padStart(2, "0")}h`;
 }
 
-function formatReport(reports: Report[], now: number): string {
-	if (reports.length === 0) return "No OAuth subscription logins for anthropic or openai-codex";
-	return reports
-		.map((report) => {
-			if (!("windows" in report)) return `${report.name}: ${report.error}`;
-			const lines = report.windows.map(
-				(window) =>
-					`  ${window.label.padEnd(10)} ${`${Math.round(window.percent)}%`.padStart(4)}` +
-					(window.resetsAt === undefined ? "" : `  resets in ${formatReset(window.resetsAt, now)}`),
-			);
-			return [report.name, ...(lines.length > 0 ? lines : ["  no limits reported"])].join("\n");
-		})
-		.join("\n");
+/** One bar per window: used, remaining, and the time to its reset. */
+export function chartLines(reports: Report[], now: number, color: (level: UsageLevel, text: string) => string = (_level, text) => text): string[] {
+	if (reports.length === 0) return ["No OAuth subscription logins for anthropic or openai-codex"];
+	return reports.flatMap((report) => {
+		if (!("windows" in report)) return [`${report.name}: ${report.error}`];
+		const lines = report.windows.map((window) => {
+			const used = Math.min(100, Math.max(0, Math.round(window.percent)));
+			const filled = Math.round((used / 100) * BAR_CELLS);
+			const bar = color(usageLevel(used), "█".repeat(filled)) + "░".repeat(BAR_CELLS - filled);
+			const reset = window.resetsAt === undefined ? "" : `  resets in ${formatReset(window.resetsAt, now)}`;
+			return `  ${window.label.padEnd(10)} ${bar} ${`${used}%`.padStart(4)} used ${`${100 - used}%`.padStart(4)} left${reset}`;
+		});
+		return [report.name, ...(lines.length > 0 ? lines : ["  no limits reported"])];
+	});
 }
 
-/** Subscription usage limits (Claude, ChatGPT Codex) in the footer and `/usage`. */
+interface Snapshot {
+	reports: Report[];
+	at: number;
+}
+
+/** Subscription usage limits (Claude, ChatGPT Codex): published for the footer extension, and charted by `/usage`. */
 export default function (pi: ExtensionAPI) {
 	let fetchedAt = 0;
 	let pending: Promise<Report[]> | undefined;
@@ -139,7 +152,9 @@ export default function (pi: ExtensionAPI) {
 		fetchedAt = Date.now();
 		pending = fetchReports(ctx)
 			.then((reports) => {
-				ctx.ui.setStatus("usage", formatFooter(reports));
+				const shared = usageShared();
+				shared.reports = reports;
+				shared.onChange?.();
 				return reports;
 			})
 			.finally(() => {
@@ -156,11 +171,17 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.hasUI) void refresh(ctx);
 	});
 
+	pi.registerEntryRenderer<Snapshot>("usage", (entry, _options, theme) =>
+		entry.data ? new Text(chartLines(entry.data.reports, entry.data.at, (level, text) => theme.fg(level, text)).join("\n"), 1, 0) : undefined,
+	);
+
 	pi.registerCommand("usage", {
-		description: "Show subscription usage limits for Claude and ChatGPT Codex",
+		description: "Chart subscription usage limits for Claude and ChatGPT Codex",
 		handler: async (_args, ctx) => {
-			const reports = (await refresh(ctx, true)) ?? [];
-			ctx.ui.notify(formatReport(reports, Date.now()), "info");
+			const snapshot: Snapshot = { reports: (await refresh(ctx, true)) ?? [], at: Date.now() };
+			// An entry is drawn in the transcript and never sent to the model.
+			if (ctx.mode === "tui") pi.appendEntry("usage", snapshot);
+			else ctx.ui.notify(chartLines(snapshot.reports, snapshot.at).join("\n"), "info");
 		},
 	});
 }

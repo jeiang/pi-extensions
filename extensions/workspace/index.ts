@@ -16,8 +16,8 @@ import { type Static, type TObject, Type } from "typebox";
 import { setSessionDir } from "./cwd.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
-import { inlinePython, PYTHON_REDIRECT, registerPython } from "./python.ts";
 import { registerShell } from "./shell.ts";
+import { registerSubagent } from "./subagent.ts";
 import {
 	baseRef,
 	carryChanges,
@@ -134,7 +134,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	registerShell(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
-	registerPython(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
+	registerSubagent(pi, { cwd, env });
 
 	pi.on("user_bash", async (event) => {
 		const local = createLocalBashOperations();
@@ -177,22 +177,6 @@ export default function (pi: ExtensionAPI) {
 			}
 			return;
 		}
-		if (event.toolName === "subagent") {
-			// pi-subagents defaults a child's cwd to the session cwd, which is still the main checkout.
-			if (!worktree || input.action !== undefined || input.machine !== undefined) return;
-			const dir = worktree.path;
-			const place = (item: Record<string, unknown>) => {
-				if (typeof item.cwd === "string") item.cwd = resolve(dir, String(remap(item.cwd)));
-				for (const key of ["tasks", "chain", "parallel"]) {
-					const list = item[key];
-					if (Array.isArray(list)) for (const child of list) if (child && typeof child === "object") place(child as Record<string, unknown>);
-				}
-			};
-			place(input);
-			if (input.args && typeof input.args === "object") place(input.args as Record<string, unknown>);
-			input.cwd ??= dir;
-			return;
-		}
 		if (event.toolName === "edit" || event.toolName === "write") {
 			if (!needsWorktree()) return;
 			const paths =
@@ -207,7 +191,6 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName !== "bash" && event.toolName !== "shell") return;
 		const command = input.command;
 		if (typeof command !== "string") return;
-		if (inlinePython(command)) return { block: true, reason: PYTHON_REDIRECT };
 		if (!needsWorktree() || !GIT_MUTATION.test(command) || /\bcd\s|\bgit\s+-C\s/.test(command)) return;
 		return { block: true, reason: NEEDS_WORKTREE };
 	});

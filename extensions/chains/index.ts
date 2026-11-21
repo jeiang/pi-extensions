@@ -153,18 +153,21 @@ export function createChains(config: ChainsConfig) {
 			};
 		});
 
-		pi.on("turn_end", (_event, ctx) => {
+		// ctx.compact aborts a running agent, so it waits for the run to settle. A print-mode process exits there.
+		pi.on("agent_settled", (_event, ctx) => {
 			const compactAt = activeChain(ctx)?.compactAt;
 			const tokens = ctx.getContextUsage()?.tokens;
-			if (!compactAt || compacting || tokens == null || tokens <= compactAt) return;
+			if (!ctx.hasUI || !compactAt || compacting || tokens == null || tokens <= compactAt) return;
 			compacting = true;
+			// The callbacks can run after the session is replaced, when reading ctx throws.
+			const { ui } = ctx;
 			ctx.compact({
 				onComplete: () => {
 					compacting = false;
 				},
 				onError: (error) => {
 					compacting = false;
-					if (ctx.hasUI) ctx.ui.notify(`Compaction failed: ${error.message}`, "error");
+					ui.notify(`Compaction failed: ${error.message}`, "error");
 				},
 			});
 		});

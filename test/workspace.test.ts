@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { inlinePython } from "../extensions/workspace/python.ts";
-import { grepRoute } from "../extensions/workspace/shell.ts";
+import { grepRoute, progressBar } from "../extensions/workspace/shell.ts";
+import { childArgs, loadAgents } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -184,61 +184,6 @@ test("grepRoute serves plain rg and grep calls only", () => {
 	assert.equal(grepRoute("rg $PAT"), undefined);
 });
 
-test("inlinePython blocks inline code and bare interpreters, not scripts or modules", () => {
-	for (const command of [
-		"python3 -c 'print(1)'",
-		"python -u -c 'print(1)'",
-		"python3 - <<'EOF'\nprint(1)\nEOF",
-		"python3 <<EOF\nprint(1)\nEOF",
-		"curl -s x | python3 -c 'import json'",
-		"cat data | python3",
-		"cd src && uv run python -c 'import x'",
-		"nix develop -c python3 -c 'print(1)'",
-		"/usr/bin/python3.12 -c 1",
-		"ssh host bash -c 'python3 -c 1'",
-		"python3",
-	])
-		assert.equal(inlinePython(command), true, command);
-	for (const command of [
-		"python3 android/tools/livery_fixture.py --out x",
-		"python -X dev script.py",
-		"python3 -m pytest -q",
-		"uv run python scripts/gen.py",
-		"python3 \"$SCRIPT\" --flag",
-		"which python3",
-		"python3 --version",
-		"echo python -c",
-		"nix shell nixpkgs#python3 -c true",
-		"git commit -m 'python -c fix'",
-	])
-		assert.equal(inlinePython(command), false, command);
-});
-
-test("the python kernel keeps state between calls, survives errors, and interrupts on timeout", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "ws-python-"));
-	const { session: s } = await session(dir, [
-		{ tool: "python", args: { code: "import os\nx = 41\nprint('hi')" } },
-		{ tool: "python", args: { code: "x + 1" } },
-		{ tool: "python", args: { code: "1/0" } },
-		{ tool: "python", args: { code: "import time\ntime.sleep(30)", timeout: 1 } },
-		{ tool: "python", args: { code: "import subprocess\nsubprocess.run(['sleep', '30'])", timeout: 1 } },
-		{ tool: "python", args: { code: "os.system('echo from-child'); x" } },
-		{ tool: "shell", args: { command: "python3 -c 'print(1)'" } },
-	]);
-	const started = Date.now();
-	await s.prompt("compute");
-	s.dispose();
-	const [first, second, third, fourth, fifth, sixth, seventh] = toolResults(s);
-	assert.equal(first, "hi");
-	assert.equal(second, "42");
-	assert.match(third ?? "", /ZeroDivisionError/);
-	assert.match(fourth ?? "", /KeyboardInterrupt[\s\S]*Interrupted after 1s/);
-	assert.match(fifth ?? "", /Interrupted after 1s/);
-	assert.match(sixth ?? "", /from-child[\s\S]*41/);
-	assert.match(seventh ?? "", /persistent kernel/);
-	assert.ok(Date.now() - started < 10_000);
-});
-
 test("remapPath follows a symlinked alias of the checkout but not a symlinked file inside it", () => {
 	const base = realpathSync(mkdtempSync(join(tmpdir(), "ws-remap-")));
 	const root = join(base, "repo");
@@ -249,4 +194,43 @@ test("remapPath follows a symlinked alias of the checkout but not a symlinked fi
 	assert.equal(remapPath(join(base, "alias", "sub", "new.txt"), root, wt), join(wt, "sub", "new.txt"));
 	assert.equal(remapPath(join(root, "link"), root, wt), join(wt, "link"));
 	assert.equal(remapPath(join(base, "other.txt"), root, wt), join(base, "other.txt"));
+});
+
+test("subagent arguments keep the child to its agent's model, tools, and extensions", () => {
+	const dir = mkdtempSync(join(tmpdir(), "ws-agents-"));
+	writeFileSync(
+		join(dir, "scout.md"),
+		"---\nname: scout\ndescription: Finds code.\nmodel: chain/light\ntools: read, shell\nextensions: ~/x/chains, /abs/guards\ninheritProjectContext: false\n---\n\nYou explore.\n",
+	);
+	writeFileSync(join(dir, "plain.md"), "---\nname: plain\ndescription: No limits.\n---\n");
+	const [plain, scout] = loadAgents(dir);
+	assert.ok(plain && scout);
+	assert.deepEqual(childArgs(scout, "find it", "/s"), [
+		"--mode", "json", "-p", "--model", "chain/light", "--tools", "read,shell", "-ne", "-e", join(homedir(), "x/chains"), "-e", "/abs/guards",
+		"--append-system-prompt", "You explore.", "-nc", "--session-dir", "/s", "--", "find it",
+	]);
+	// An agent without a tool list must still not get the subagent tool.
+	assert.deepEqual(childArgs(plain, "t", undefined), ["--mode", "json", "-p", "--exclude-tools", "subagent", "-ne", "--no-session", "--", "t"]);
+});
+
+test("progressBar reads build steps and percentages", () => {
+	assert.equal(progressBar("[3/12] Compiling foo"), `${"█".repeat(6)}${"░".repeat(18)} 25%`);
+	assert.equal(progressBar("copied 3 of 4 files"), `${"█".repeat(18)}${"░".repeat(6)} 75%`);
+	assert.equal(progressBar("  45% 1.2MB/s"), `${"█".repeat(11)}${"░".repeat(13)} 45%`);
+	assert.equal(progressBar("exit 250%"), undefined);
+	assert.equal(progressBar("plain line"), undefined);
+});
+
+test("a carriage-return progress line updates in place in the live view", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "ws-live-"));
+	const { session: s } = await session(dir, [{ tool: "shell", args: { command: "printf 'start\\n10%%\\r50%%\\r'; sleep 0.3; printf '100%%\\ndone\\n'" } }]);
+	const views: string[] = [];
+	s.subscribe((event) => {
+		if (event.type === "tool_execution_update") views.push(event.partialResult.content[0]?.text ?? "");
+	});
+	await s.prompt("run");
+	s.dispose();
+	assert.equal(views.at(-1), "start\n100%\ndone");
+	assert.ok(views.some((view) => view.startsWith("start\n50%\n█")), views.join("\n---\n"));
+	assert.match(toolResults(s)[0] ?? "", /10%\r50%\r100%\ndone/);
 });

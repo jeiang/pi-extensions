@@ -25,7 +25,8 @@ interface Job {
 	controller: AbortController;
 	/** Byte offset `read` has returned up to. */
 	cursor: number;
-	listeners: Set<(line: string) => void>;
+	/** `overwrite`: the line replaces the one before it, as after a carriage return. */
+	listeners: Set<(line: string, overwrite: boolean) => void>;
 	done: Promise<void>;
 }
 
@@ -55,6 +56,19 @@ const duration = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `$
 
 function tail(output: string, lines = TAIL_LINES): string {
 	return output.split("\n").slice(-lines).join("\n");
+}
+
+const BAR_CELLS = 24;
+const STEP = /\[(\d+)\/(\d+)\]|\b(\d+) of (\d+)\b|(\d{1,3}(?:\.\d+)?)%/;
+
+/** A bar for a line that reports a build step or a percentage (`[3/12]`, `3 of 12`, `45%`). */
+export function progressBar(line: string): string | undefined {
+	const match = line.match(STEP);
+	if (!match) return undefined;
+	const fraction = match[5] === undefined ? Number(match[1] ?? match[3]) / Number(match[2] ?? match[4]) : Number(match[5]) / 100;
+	if (!(fraction >= 0 && fraction <= 1)) return undefined;
+	const filled = Math.round(fraction * BAR_CELLS);
+	return `${"█".repeat(filled)}${"░".repeat(BAR_CELLS - filled)} ${Math.round(fraction * 100)}%`;
 }
 
 function readLog(job: Job, from = 0): string {
@@ -148,8 +162,14 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		const devshellError = options.devshellError(cwd);
 		writeFileSync(log, devshellError ? `[shell] devshell failed, ran without it:\n${devshellError}\n` : "");
 		const controller = new AbortController();
-		const listeners = new Set<(line: string) => void>();
+		const listeners: Job["listeners"] = new Set();
 		let partial = "";
+		let overwrite = false;
+		const emit = (line: string) => {
+			// A bare carriage return redraws nothing.
+			if (overwrite && line === "") return;
+			for (const listener of listeners) listener(line, overwrite);
+		};
 		const job: Job = { id, command, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, done: Promise.resolve() };
 		job.done = ops
 			.exec(command, cwd, {
@@ -157,9 +177,14 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 				env: { ...env, PYTHONUNBUFFERED: "1" },
 				onData: (data) => {
 					appendFileSync(log, data);
-					const lines = (partial + data.toString("utf8")).split(/\r?\n|\r/);
-					partial = lines.pop() ?? "";
-					for (const line of lines) for (const listener of listeners) listener(line);
+					const parts = (partial + data.toString("utf8")).split(/(\r?\n|\r)/);
+					partial = parts.pop() ?? "";
+					// A carriage return that ends the chunk may be the first half of \r\n.
+					if (partial === "" && parts.at(-1) === "\r") partial = `${parts.splice(-2)[0]}\r`;
+					for (let i = 0; i + 1 < parts.length; i += 2) {
+						emit(parts[i] ?? "");
+						overwrite = parts[i + 1] === "\r";
+					}
 				},
 			})
 			.then(({ exitCode }) => {
@@ -172,7 +197,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			})
 			.finally(() => {
 				job.ended = Date.now();
-				if (partial) for (const listener of listeners) listener(partial);
+				if (partial) emit(partial.replace(/\r$/, ""));
 			});
 		jobs.set(id, job);
 		return job;
@@ -271,10 +296,12 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 				reportExit(job);
 				return text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`);
 			}
-			let streamed = "";
-			const stream = (line: string) => {
-				streamed = tail(`${streamed}\n${line}`, 200);
-				onUpdate?.({ content: [{ type: "text", text: streamed.trimStart() }], details: undefined });
+			const live: string[] = [];
+			const stream = (line: string, replaces: boolean) => {
+				if (replaces && live.length > 0) live[live.length - 1] = line;
+				else if (live.push(line) > 200) live.shift();
+				const bar = progressBar(line);
+				onUpdate?.({ content: [{ type: "text", text: bar ? `${live.join("\n")}\n${bar}` : live.join("\n") }], details: undefined });
 			};
 			job.listeners.add(stream);
 			const seconds = input.background ? input.wait_seconds : (input.wait_seconds ?? input.timeout ?? DEFAULT_TIMEOUT_S);
