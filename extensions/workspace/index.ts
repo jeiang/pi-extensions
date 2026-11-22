@@ -12,6 +12,7 @@ import { EditStore } from "@oh-my-pi/pi-natives";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Static, type TObject, Type } from "typebox";
+import { restrictedFolder } from "../guards/index.ts";
 import { setSessionDir } from "./cwd.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { structuredGrep } from "./grep.ts";
@@ -122,7 +123,13 @@ export default function (pi: ExtensionAPI) {
 	override(hashline.edit);
 	override(hashline.replace);
 	override(hashline.write);
-	override(substituteTool(store));
+	override(
+		substituteTool(store, (absolute) => {
+			if (needsWorktree() && inMainCheckout(absolute)) return NEEDS_WORKTREE;
+			const folder = restrictedFolder(absolute, cwd());
+			return folder ? `${folder} is restricted. Ask the user before touching it.` : undefined;
+		}),
+	);
 	override(structuredGrep);
 	override((dir) => createFindToolDefinition(dir), { exposure: "codemode" });
 	override((dir) => createLsToolDefinition(dir), { exposure: "codemode" });

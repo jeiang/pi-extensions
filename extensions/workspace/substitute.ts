@@ -136,7 +136,8 @@ function render(output: Output): string {
 	return [head, ...rows, ...more, ...(output.note ? [output.note] : [])].join("\n");
 }
 
-export function substituteTool(store: EditStore) {
+/** `refuse` names why a file must not be written (such as the main checkout before a worktree exists), checked on every file a run would change. */
+export function substituteTool(store: EditStore, refuse: (absolute: string) => string | undefined = () => undefined) {
 	return (cwd: string): ToolDefinition<typeof params, undefined> => ({
 		name: "substitute",
 		label: "Substitute",
@@ -161,6 +162,10 @@ export function substituteTool(store: EditStore) {
 			};
 			if (input.apply) {
 				if (input.token !== token) throw new Error("The token does not match: the arguments differ from the preview or a searched file changed since. Preview again.");
+				for (const change of changes) {
+					const reason = refuse(change.absolute);
+					if (reason) throw new Error(`${change.path}: ${reason}`);
+				}
 				for (const change of changes) {
 					await writeFile(change.absolute, change.after);
 					store.recordSnapshot(change.absolute, change.after.replace(/\r\n?/g, "\n"), []);

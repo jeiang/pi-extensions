@@ -83,6 +83,22 @@ test("substitute previews without writing, refuses a stale token, and searches g
 	assert.equal(readFileSync(join(dir, "build", "gen.ts"), "utf8"), "foo(3);\n");
 });
 
+test("substitute writes nothing when any file it would change is refused, even one reached through a parent directory", async () => {
+	const parent = temp();
+	const dir = join(parent, "repo");
+	mkdirSync(dir);
+	writeFileSync(join(parent, "outside.ts"), "foo\n");
+	writeFileSync(join(dir, "inside.ts"), "foo\n");
+	const tool = substituteTool(new EditStore(), (absolute) => (absolute.startsWith(`${dir}/`) ? "main checkout" : undefined))(dir);
+	const call = (input: Record<string, unknown>) =>
+		tool.execute("id", { pattern: "foo", replacement: "bar", paths: [".."], include_ignored: true, ...input } as never, undefined, undefined, undefined as never);
+	const preview = (await call({})).structuredContent as { token: string; total: number };
+	assert.equal(preview.total, 2);
+	await assert.rejects(call({ apply: true, token: preview.token }), /main checkout/);
+	assert.equal(readFileSync(join(parent, "outside.ts"), "utf8"), "foo\n");
+	assert.equal(readFileSync(join(dir, "inside.ts"), "utf8"), "foo\n");
+});
+
 test("grep's structured result follows pi's grep output", async () => {
 	const dir = temp();
 	mkdirSync(join(dir, "src"));
