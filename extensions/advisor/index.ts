@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Message, Model, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
-import { parseTarget } from "../chains/index.ts";
+import { LEVELS, parseTarget } from "../chains/index.ts";
 import { addUsage } from "../footer/cost.ts";
 
 export interface AdvisorConfig {
@@ -101,16 +101,85 @@ function answerText(message: AssistantMessage): string {
 	return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n").trim();
 }
 
+type Target = ReturnType<typeof parseTarget>;
+
+const STATE = "advisor-state";
+
+interface AdvisorState {
+	enabled: boolean;
+	models: string[];
+}
+
+const format = (target: Target) => `${target.provider}/${target.id}:${target.thinkingLevel}`;
+
 export function createAdvisor(config: AdvisorConfig) {
-	const targets = config.models.map(parseTarget);
 	const timeoutMs = config.timeoutMs ?? 90_000;
 	const systemPrompt = config.rubric ? `${INSTRUCTIONS}\n\nRubric (a breach is a concern):\n${config.rubric}` : INSTRUCTIONS;
 
 	return (pi: ExtensionAPI) => {
+		let targets = config.models.map(parseTarget);
+		let enabled = true;
+		let available: Model<Api>[] = [];
 		let history: Message[] = [];
 		let pending: AgentMessageLike[] = [];
 		let advisedThisInput = false;
 		let acted = false;
+
+		const setToolActive = () => {
+			const others = pi.getActiveTools().filter((name) => name !== "advise");
+			pi.setActiveTools(enabled ? [...others, "advise"] : others);
+		};
+		const status = () => `Advisor ${enabled ? "on" : "off"}: ${targets.map(format).join(" → ")}`;
+
+		// pi restores the tool loadout per branch, so the saved state is re-read on every branch change.
+		const restore = (_event: unknown, ctx: ExtensionContext) => {
+			available = ctx.modelRegistry.getAvailable();
+			const saved = ctx.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "custom" && entry.customType === STATE)
+				.at(-1);
+			const state = saved?.type === "custom" ? (saved.data as AdvisorState | undefined) : undefined;
+			enabled = state?.enabled ?? true;
+			targets = (state?.models ?? config.models).map(parseTarget);
+			setToolActive();
+		};
+		pi.on("session_start", restore);
+		pi.on("session_tree", restore);
+
+		pi.registerCommand("advisor", {
+			description: "Show or change the advisor: /advisor [on|off|<level>|<provider/model[:level]>]",
+			getArgumentCompletions: (prefix) => {
+				const colon = prefix.lastIndexOf(":");
+				const values =
+					colon > prefix.indexOf("/") && prefix.includes("/")
+						? Object.keys(LEVELS).map((level) => `${prefix.slice(0, colon + 1)}${level}`)
+						: ["on", "off", ...Object.keys(LEVELS), ...available.map((model) => `${model.provider}/${model.id}`)];
+				return values.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
+			},
+			handler: async (args, ctx) => {
+				const arg = args.trim();
+				if (arg === "on" || arg === "off") {
+					enabled = arg === "on";
+					setToolActive();
+				} else if (Object.hasOwn(LEVELS, arg)) {
+					const [first, ...rest] = targets;
+					if (first) targets = [{ ...first, thinkingLevel: arg as ModelThinkingLevel }, ...rest];
+				} else if (arg) {
+					let target: Target;
+					try {
+						target = parseTarget(arg);
+					} catch {
+						return ctx.ui.notify(`Expected on, off, a reasoning level, or provider/model[:level], got "${arg}"`, "error");
+					}
+					if (!ctx.modelRegistry.find(target.provider, target.id)) return ctx.ui.notify(`Unknown model ${target.provider}/${target.id}`, "error");
+					// Without a level suffix the new model keeps the current primary's level.
+					if (!Object.hasOwn(LEVELS, arg.slice(arg.lastIndexOf(":") + 1)) && targets[0]) target.thinkingLevel = targets[0].thinkingLevel;
+					targets = [target, ...targets.filter((t) => t.provider !== target.provider || t.id !== target.id)];
+				}
+				if (arg) pi.appendEntry<AdvisorState>(STATE, { enabled, models: targets.map(format) });
+				ctx.ui.notify(status(), "info");
+			},
+		});
 
 		/** Asks the first target that answers. `usage` covers every attempt, failed ones included. */
 		const ask = async (ctx: ExtensionContext, question: string, signal?: AbortSignal): Promise<{ answer?: string; usage?: Usage }> => {
@@ -162,7 +231,7 @@ export function createAdvisor(config: AdvisorConfig) {
 
 		// The last actionable point of a run: the agent continues in the same run and restates its report.
 		pi.on("agent_before_settle", async (event, ctx) => {
-			if (event.outcome !== "completed" || advisedThisInput) {
+			if (!enabled || event.outcome !== "completed" || advisedThisInput) {
 				pending = [];
 				return;
 			}
