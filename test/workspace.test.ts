@@ -54,6 +54,36 @@ test("writes to the main checkout are blocked until a worktree exists, then land
 	assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: worktree, encoding: "utf8" }).trim(), "add-a");
 });
 
+test("a repository made during the session gets worktrees but no write block", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "ws-new-")));
+	const init = "git init -q -b main && git -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init";
+	const { session: s } = await session(dir, [
+		{ tool: "bash", args: { command: init } },
+		{ tool: "write", args: { path: "a.txt", content: "a\n" } },
+		{ tool: "worktree", args: { action: "create", name: "proto" } },
+		{ tool: "write", args: { path: "b.txt", content: "b\n" } },
+	]);
+	await s.prompt("go");
+	s.dispose();
+	assert.equal(readFileSync(join(dir, "a.txt"), "utf8"), "a\n");
+	assert.match(toolResults(s)[2] ?? "", /Now in worktree .*proto/);
+	assert.equal(readFileSync(join(dir, ".worktrees", "proto", "b.txt"), "utf8"), "b\n");
+});
+
+test("a nested repository in the main checkout is neither blocked nor remapped", async () => {
+	const dir = repo();
+	const { session: s } = await session(dir, [
+		{ tool: "bash", args: { command: "git init -q nested" } },
+		{ tool: "write", args: { path: "nested/a.txt", content: "a\n" } },
+		{ tool: "worktree", args: { action: "create", name: "wt" } },
+		{ tool: "write", args: { path: join(dir, "nested", "b.txt"), content: "b\n" } },
+	]);
+	await s.prompt("go");
+	s.dispose();
+	assert.equal(readFileSync(join(dir, "nested", "a.txt"), "utf8"), "a\n");
+	assert.equal(readFileSync(join(dir, "nested", "b.txt"), "utf8"), "b\n");
+});
+
 test("carry moves edited and new files out of the main checkout into the worktree", async () => {
 	const dir = repo();
 	const wt = await createWorktree(dir, "carry");

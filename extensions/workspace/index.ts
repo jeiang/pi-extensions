@@ -45,6 +45,8 @@ const NEEDS_WORKTREE =
 export default function (pi: ExtensionAPI) {
 	let sessionCwd = process.cwd();
 	let repo: Repo | undefined;
+	// Only a repository with commits at session start requires a worktree; one made during the session does not.
+	let guarded = false;
 	let worktree: Worktree | undefined;
 	let request = "";
 
@@ -62,7 +64,7 @@ export default function (pi: ExtensionAPI) {
 			},
 		});
 	const remap = (path: unknown) => (typeof path === "string" && repo && worktree ? remapPath(path, repo.root, worktree.path) : path);
-	const needsWorktree = () => Boolean(repo && !repo.linked && repo.hasCommits && !worktree);
+	const needsWorktree = () => guarded && !worktree;
 	const inMainCheckout = (path: string) => Boolean(repo && checkoutRelative(resolve(sessionCwd, path.replace(/^@/, "")), repo.root) !== undefined);
 
 	const devshells = new Map<string, { stamp: string; pending: Promise<Devshell | undefined> }>();
@@ -180,6 +182,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCwd = ctx.cwd;
 		repo = await detectRepo(ctx.cwd);
+		guarded = Boolean(repo && !repo.linked && repo.hasCommits);
 		const saved = ctx.sessionManager
 			.getBranch()
 			.filter((entry) => entry.type === "custom" && entry.customType === ENTRY)
@@ -299,6 +302,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: worktreeParams,
 		exposure: "model-only",
 		async execute(_id, input: Static<typeof worktreeParams>, _signal, _onUpdate, ctx) {
+			if (!worktree && !repo?.hasCommits) repo = await detectRepo(sessionCwd);
 			if (input.repo) {
 				const other = await detectRepo(resolve(cwd(), input.repo.replace(/^@/, "")));
 				if (!other) throw new Error(`${input.repo} is not in a git repository.`);
@@ -328,7 +332,7 @@ export default function (pi: ExtensionAPI) {
 					const gone = worktree;
 					switchTo(ctx, undefined);
 					await fastForwardMain(root, await baseRef(root));
-					return text(`Removed ${gone.path}; branch ${gone.branch} is kept. Create or enter a worktree before the next write.`);
+					return text(`Removed ${gone.path}; branch ${gone.branch} is kept.${guarded ? " Create or enter a worktree before the next write." : ""}`);
 				}
 				case "list": {
 					const rows = (await ownWorktrees(root)).map((w) => `${w.path === worktree?.path ? "* " : "  "}${w.path} ${w.branch ?? "(detached)"}`);

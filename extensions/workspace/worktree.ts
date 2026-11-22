@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, symlinkSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { direnvAllowed } from "./devshell.ts";
 
@@ -209,13 +209,15 @@ function realDir(path: string): string {
 	}
 }
 
-/** The path of an absolute `path` relative to the main checkout, or undefined outside it or under `.worktrees/`. */
+/** The path of an absolute `path` relative to the main checkout, or undefined outside it, under `.worktrees/`, or in a nested repository. */
 export function checkoutRelative(path: string, root: string): string | undefined {
 	const outside = (rel: string) => rel.startsWith("..") || isAbsolute(rel);
 	let rel = relative(root, path);
 	// git reports the real root, so /tmp/repo on macOS arrives as /private/tmp/repo.
 	if (outside(rel)) rel = relative(root, join(realDir(dirname(path)), basename(path)));
 	if (outside(rel) || rel === ".worktrees" || rel.startsWith(".worktrees/")) return undefined;
+	const parts = rel ? rel.split(sep) : [];
+	for (let i = 1; i <= parts.length; i++) if (existsSync(join(root, ...parts.slice(0, i), ".git"))) return undefined;
 	return rel;
 }
 
