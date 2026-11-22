@@ -294,12 +294,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		const unfollow = follow(job, onUpdate);
 		const why = await waitFor(job, undefined, input.timeout, signal);
 		unfollow();
-		const wall_time_seconds = Math.round(((job.ended ?? Date.now()) - job.started) / 100) / 10;
 		if (why === "interrupt") {
 			reportExit(job);
+			// Throwing ends the calling script, so its later steps cannot run while this command still does.
 			const moved = progress(job, "The user interrupted; moved to the background. The shell tool can read, wait on, or kill this job.");
-			const output = moved.content.map((part) => (part.type === "text" ? part.text : "")).join("");
-			return { ...moved, structuredContent: { output, truncated: false, exit_code: -1, wall_time_seconds } };
+			throw new Error(moved.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
 		}
 		if (why !== "exit") {
 			job.controller.abort();
@@ -316,7 +315,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			truncated: full.truncated,
 			...(full.truncated ? { full_output_path: job.log } : {}),
 			exit_code: job.exitCode,
-			wall_time_seconds,
+			wall_time_seconds: Math.round(((job.ended ?? Date.now()) - job.started) / 100) / 10,
 		};
 		return { ...result, structuredContent };
 	};

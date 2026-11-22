@@ -123,7 +123,7 @@ export default function (pi: ExtensionAPI) {
 	const bashTemplate = createBashToolDefinition(sessionCwd);
 	pi.registerTool({
 		...bashTemplate,
-		description: `${bashTemplate.description} If the user interrupts, it resolves with exit_code -1 and the command keeps running as a shell job.`,
+		description: `${bashTemplate.description} If the user interrupts, the call rejects with the job id, which ends the script unless it catches the error, and the command keeps running as a shell job.`,
 		exposure: "codemode",
 		execute: (_id, params, signal, onUpdate) => shell.bash(params, signal, onUpdate),
 	});
