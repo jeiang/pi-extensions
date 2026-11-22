@@ -359,7 +359,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("worktree", {
 		description: "Create the session's git worktree: /worktree <name>",
 		handler: async (args, ctx) => {
-			if (!needsWorktree() || !repo) return ctx.ui.notify(worktree ? `Already in ${worktree.path}` : "No worktree needed here", "info");
+			if (worktree) return ctx.ui.notify(`Already in ${worktree.path}`, "info");
+			if (!repo?.hasCommits) repo = await detectRepo(sessionCwd);
+			if (!repo || repo.linked || !repo.hasCommits) return ctx.ui.notify("No worktree needed here", "info");
 			switchTo(ctx, await createWorktree(repo.root, args.trim() || request || "work"));
 		},
 	});
