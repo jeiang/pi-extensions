@@ -66,10 +66,16 @@ action `prune` to delete its merged worktrees and branches.
 
 ## Tools
 
-`shell` runs one process. `codemode` runs several tool calls in one step or
-filters large output before you see it. Do not write a script as a heredoc
-or `-c` string in `shell`: use `codemode`, or write a script file when the
-script will be run again.
+`shell` runs one process. `codemode` runs a JavaScript script that calls
+tools; use it when a step depends on another's result (an exit code, a
+match, a JSON field) instead of taking another turn, and to filter large
+output. Do not write a script as a heredoc or `-c` string in `shell`: use
+`codemode`, or write a script file when the script will be run again.
+
+Prefer the tool to the shell habit: `read` with `ranges` or a negative
+`offset` over `sed -n`, `cat`, or `tail`; `grep` over `grep -rn`;
+`replace` and `substitute` over `sed -i`; `shell`'s `tail` and its log file
+over piping into `tail`, `head`, or `grep`.
 
 Delegate only to save context: `scout` to find code you cannot locate in
 two searches, `researcher` for a question that needs web sources or

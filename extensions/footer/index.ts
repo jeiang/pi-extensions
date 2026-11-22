@@ -17,7 +17,7 @@ const THINKING: Record<string, string> = {
 	max: "\uf06d",
 };
 // Tools after which the working tree can differ.
-const CHANGES_FILES: Record<string, true> = { edit: true, write: true, shell: true, bash: true, codemode: true, worktree: true, github: true };
+const CHANGES_FILES: Record<string, true> = { edit: true, write: true, replace: true, substitute: true, shell: true, bash: true, codemode: true, worktree: true, github: true };
 // The turn time has its own segment.
 const OWN_STATUSES: Record<string, true> = { "turn-time": true };
 

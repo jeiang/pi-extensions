@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
@@ -51,6 +51,9 @@ const params = Type.Object({
 		Type.String({ description: "Regex: return as soon as an output line matches; later matching lines wake you while the job runs." }),
 	),
 	wait_seconds: Type.Optional(Type.Number({ description: "Return after this many seconds even if the job still runs." })),
+	tail: Type.Optional(
+		Type.Number({ description: "Return only the last N lines of output. The full output stays in the log file named in the result; read or grep it instead of piping into tail, head, or grep." }),
+	),
 	action: Type.Optional(
 		Type.Union([Type.Literal("status"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("kill")], {
 			description: "Act on jobs instead of running a command: status lists jobs; read returns new output; wait blocks like wait_on/wait_seconds or until exit; kill stops it.",
@@ -61,7 +64,20 @@ const params = Type.Object({
 
 type Params = Static<typeof params>;
 
-const text = (value: string): AgentToolResult<undefined> => ({ content: [{ type: "text", text: value }], details: undefined });
+export const shellOutputSchema = Type.Object({
+	job: Type.Optional(Type.String()),
+	status: Type.Optional(Type.String({ description: "running, exited, killed, or failed" })),
+	exit_code: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+	log: Type.Optional(Type.String({ description: "The full output; read or grep it." })),
+	output: Type.String({ description: "The output shown, or for action status the job summaries." }),
+});
+type ShellResult = Static<typeof shellOutputSchema>;
+
+const text = (value: string): AgentToolResult<undefined> & { structuredContent: ShellResult } => ({
+	content: [{ type: "text", text: value }],
+	details: undefined,
+	structuredContent: { output: value },
+});
 
 const duration = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`);
 
@@ -155,20 +171,42 @@ export interface ShellOptions {
 export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 	const jobs = new Map<string, Job>();
 	const ops = createLocalBashOperations();
-	const logDir = join(tmpdir(), "pi-shell");
+	let logDir = join(tmpdir(), "pi-shell");
+	// Logs live beside the session file so their paths survive a restart or resume.
+	pi.on("session_start", (_event, ctx) => {
+		const file = ctx.sessionManager.getSessionFile();
+		logDir = file ? join(dirname(file), basename(file, ".jsonl"), "logs") : join(tmpdir(), "pi-shell");
+	});
 	let next = 1;
 	const dirOf = (input?: string) => {
 		const dir = options.cwd(input);
 		if (!existsSync(dir)) throw new Error(`No directory ${dir}`);
 		return dir;
 	};
+	/** The last `lines` lines of `output`, or pi's default tail truncation. */
+	const view = (output: string, lines?: number) => {
+		if (lines === undefined) return truncateTail(output).content;
+		return output.replace(/\n$/, "").split("\n").slice(-Math.max(1, Math.floor(lines))).join("\n");
+	};
+	const shape = (job: Job, output: string): ShellResult => ({
+		job: job.id,
+		status: job.status,
+		...(job.exitCode !== undefined ? { exit_code: job.exitCode } : {}),
+		log: job.log,
+		output,
+	});
 	/** The exit result of a foreground command; the job is done and forgotten. */
-	const finished = (job: Job) => {
+	const finished = (job: Job, lines?: number) => {
 		jobs.delete(job.id);
-		const truncated = truncateTail(readLog(job));
-		const note = truncated.truncated ? `\n[output truncated, full log: ${job.log}]` : "";
+		const output = view(readLog(job), lines);
 		const status = job.status === "exited" ? (job.exitCode === 0 ? "" : `\nCommand exited with code ${job.exitCode}`) : `\n[${job.status}]`;
-		return { content: [{ type: "text" as const, text: `${truncated.content}${note}${status}`.trim() || "(no output)" }], details: undefined, isError: job.status !== "exited" || job.exitCode !== 0 };
+		const body = `${output}${status}`.trim() || "(no output)";
+		return {
+			content: [{ type: "text" as const, text: `${body}\nlog: ${job.log}` }],
+			details: undefined,
+			isError: job.status !== "exited" || job.exitCode !== 0,
+			structuredContent: shape(job, output),
+		};
 	};
 
 	const wake = (content: string, error = false) =>
@@ -283,12 +321,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			wake(`Job finished: ${summary(job)}\nLast lines:\n${tail(readLog(job))}`, failed);
 		});
 
-	const progress = (job: Job, why: string) => {
+	const progress = (job: Job, why: string, lines?: number) => {
 		const output = readLog(job, job.cursor);
 		job.cursor += Buffer.byteLength(output);
-		const truncated = truncateTail(output);
-		const note = truncated.truncated ? `[output truncated, full log: ${job.log}]\n` : "";
-		return text(`${why}\n${summary(job)}\n${note}${truncated.content}`);
+		const shown = view(output, lines);
+		return { ...text(`${why}\n${summary(job)}\n${shown}`), structuredContent: shape(job, shown) };
 	};
 
 	const findJob = (id: string | undefined): Job => {
@@ -302,7 +339,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 	});
 
 	/** The codemode `bash` tool: pi's result shape, run as a job so that an interrupt leaves the command running. */
-	const bash = async (input: { command: string; timeout?: number; cwd?: string }, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<undefined> | undefined) => {
+	const bash = async (
+		input: { command: string; timeout?: number; cwd?: string; tail?: number },
+		signal: AbortSignal | undefined,
+		onUpdate: AgentToolUpdateCallback<undefined> | undefined,
+	) => {
 		const job = await start(input.command, dirOf(input.cwd));
 		const unfollow = follow(job, onUpdate);
 		const why = await waitFor(job, undefined, input.timeout, signal);
@@ -320,13 +361,14 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			const status = why === "abort" ? "Command aborted" : `Command timed out after ${input.timeout} seconds`;
 			throw new Error(`${truncateTail(readLog(job)).content}\n\n${status}`);
 		}
-		const result = finished(job);
+		const result = finished(job, input.tail);
 		if (job.status !== "exited" || job.exitCode == null) throw new Error(result.content[0]?.text);
-		const full = truncateTail(readLog(job), { maxBytes: STRUCTURED_MAX_BYTES, maxLines: Number.MAX_SAFE_INTEGER });
+		const full = input.tail === undefined ? truncateTail(readLog(job), { maxBytes: STRUCTURED_MAX_BYTES, maxLines: Number.MAX_SAFE_INTEGER }) : { content: result.structuredContent.output, truncated: true };
 		const structuredContent = {
 			output: full.content,
 			truncated: full.truncated,
 			...(full.truncated ? { full_output_path: job.log } : {}),
+			log: job.log,
 			exit_code: job.exitCode,
 			wall_time_seconds: Math.round(((job.ended ?? Date.now()) - job.started) / 100) / 10,
 		};
@@ -337,36 +379,43 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		name: "shell",
 		label: "Shell",
 		description:
-			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout`, or when the user interrupts, moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Read and search files with read/grep, not shell.",
+			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout`, or when the user interrupts, moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Every result names the log file holding the full output: pass `tail` for the end, then read (offset/limit) or grep the log instead of piping into tail, head, or grep. Scripts get { job, status, exit_code, log, output }.",
 		promptSnippet: "Run processes (builds, tests, git, nix, ssh); background jobs with early return",
 		parameters: params,
-		exposure: "model-only",
+		outputSchema: shellOutputSchema,
 		async execute(_id, input: Params, signal, onUpdate, ctx: ExtensionToolContext) {
 			if (input.action === "status") return text([...jobs.values()].map(summary).join("\n") || "No jobs.");
 			if (input.action === "kill") {
 				const job = findJob(input.job);
 				job.controller.abort();
 				await job.done;
-				return text(summary(job));
+				return { ...text(summary(job)), structuredContent: shape(job, "") };
 			}
 			const pattern = input.wait_on ? new RegExp(input.wait_on.replace(/^\(\?i\)/, ""), input.wait_on.startsWith("(?i)") ? "i" : "") : undefined;
-			if (input.action === "read") return progress(findJob(input.job), "New output:");
+			if (input.action === "read") return progress(findJob(input.job), "New output:", input.tail);
 			if (input.action === "wait") {
 				const job = findJob(input.job);
 				const why = await waitFor(job, pattern, input.wait_seconds, signal);
-				return progress(job, `Wait ended: ${why}.`);
+				return progress(job, `Wait ended: ${why}.`, input.tail);
 			}
 			if (!input.command) throw new Error("command is required");
 			const cwd = dirOf(input.cwd);
 			const route = grepRoute(input.command);
 			if (route && !input.background) {
 				const outcome = await ctx.executeTool("grep", { ...route, path: route.path ?? cwd }, { signal });
-				if (!outcome.isError) return { content: outcome.result.content, details: undefined };
+				if (!outcome.isError) {
+					const found = outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+					mkdirSync(logDir, { recursive: true });
+					const log = join(logDir, `${process.pid}-grep${next++}.log`);
+					writeFileSync(log, found);
+					const shown = view(found, input.tail);
+					return { ...text(`${shown}\nlog: ${log}`), structuredContent: { status: "exited", exit_code: 0, log, output: shown } };
+				}
 			}
 			const job = await start(input.command, cwd);
 			if (input.background && !pattern && input.wait_seconds === undefined) {
 				reportExit(job);
-				return text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`);
+				return { ...text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`), structuredContent: shape(job, "") };
 			}
 			const unfollow = follow(job, onUpdate);
 			const seconds = input.background ? input.wait_seconds : (input.wait_seconds ?? input.timeout ?? DEFAULT_TIMEOUT_S);
@@ -375,13 +424,13 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			if (why === "abort") {
 				job.controller.abort();
 				await job.done;
-				return progress(job, "Cancelled.");
+				return progress(job, "Cancelled.", input.tail);
 			}
-			if (why === "exit") return finished(job);
+			if (why === "exit") return finished(job, input.tail);
 			if (pattern) watchLater(job, pattern);
 			reportExit(job);
 			const moved = why === "match" ? "Matched; still running." : why === "interrupt" ? "The user interrupted; moved to the background." : "Still running; moved to the background.";
-			return progress(job, moved);
+			return progress(job, moved, input.tail);
 		},
 	});
 

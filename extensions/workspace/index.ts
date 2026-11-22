@@ -2,7 +2,6 @@ import {
 	type BashOperations,
 	createBashToolDefinition,
 	createFindToolDefinition,
-	createGrepToolDefinition,
 	createLocalBashOperations,
 	createLsToolDefinition,
 	type ExtensionAPI,
@@ -13,12 +12,15 @@ import { EditStore } from "@oh-my-pi/pi-natives";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Static, type TObject, Type } from "typebox";
+import { restrictedFolder } from "../guards/index.ts";
 import { setSessionDir } from "./cwd.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
+import { structuredGrep } from "./grep.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerInterrupt } from "./interrupt.ts";
 import { cwdParam, registerShell } from "./shell.ts";
 import { registerSubagent } from "./subagent.ts";
+import { substituteTool } from "./substitute.ts";
 import {
 	baseRef,
 	carryChanges,
@@ -98,6 +100,7 @@ export default function (pi: ExtensionAPI) {
 			async execute(id, params, signal, onUpdate, ctx) {
 				const input = { ...params };
 				if ("path" in input && typeof input.path === "string") Object.assign(input, { path: remap(input.path) });
+				if ("paths" in input && Array.isArray(input.paths)) Object.assign(input, { paths: input.paths.map(remap) });
 				if ("input" in input && typeof input.input === "string" && repo && worktree) {
 					const { root } = repo;
 					const target = worktree.path;
@@ -114,11 +117,22 @@ export default function (pi: ExtensionAPI) {
 		});
 	};
 
-	const hashline = hashlineTools(new EditStore());
+	const store = new EditStore();
+	const hashline = hashlineTools(store);
 	override(hashline.read);
 	override(hashline.edit);
+	override(hashline.replace);
 	override(hashline.write);
-	override((dir) => createGrepToolDefinition(dir), { exposure: "codemode" });
+	override(
+		substituteTool(store, (absolute, input) => {
+			if (needsWorktree() && inMainCheckout(absolute)) return NEEDS_WORKTREE;
+			// guards asks the user about restricted folders named in paths; one reached only by expanding a directory was never asked about.
+			const folder = restrictedFolder(absolute, cwd());
+			if (!folder || input.paths?.some((path) => restrictedFolder(path, cwd()) === folder)) return undefined;
+			return `${folder} is restricted; name it in paths so the user is asked.`;
+		}),
+	);
+	override(structuredGrep);
 	override((dir) => createFindToolDefinition(dir), { exposure: "codemode" });
 	override((dir) => createLsToolDefinition(dir), { exposure: "codemode" });
 
@@ -128,11 +142,31 @@ export default function (pi: ExtensionAPI) {
 		...bashTemplate,
 		description: `${bashTemplate.description} If the user interrupts, the call rejects with the job id, which ends the script unless it catches the error, and the command keeps running as a shell job.`,
 		exposure: "codemode",
-		parameters: Type.Object({ ...bashTemplate.parameters.properties, cwd: cwdParam }),
+		parameters: Type.Object({
+			...bashTemplate.parameters.properties,
+			cwd: cwdParam,
+			tail: Type.Optional(Type.Number({ description: "Return only the last N lines; the full output stays in the log file named in `log`." })),
+		}),
 		execute: (_id, params, signal, onUpdate) => shell.bash(params, signal, onUpdate),
 	});
 	registerSubagent(pi, { cwd: () => cwd(), env });
 	registerInterrupt(pi);
+	pi.registerTool({
+		name: "sleep",
+		label: "Sleep",
+		description: "Wait up to 300 seconds, for polling loops in scripts, which have no timers. An interrupt ends the wait early.",
+		parameters: Type.Object({ seconds: Type.Number({ description: "Seconds to wait, at most 300." }) }),
+		exposure: "codemode",
+		async execute(_id, input: { seconds: number }, signal) {
+			const ms = Math.min(300, Math.max(0, input.seconds)) * 1000;
+			await new Promise<void>((done) => {
+				const timer = setTimeout(done, ms);
+				signal?.addEventListener("abort", () => (clearTimeout(timer), done()), { once: true });
+			});
+			if (signal?.aborted) throw new Error("Sleep interrupted");
+			return { content: [{ type: "text", text: `Slept ${ms / 1000}s` }], details: undefined };
+		},
+	});
 
 	pi.on("user_bash", async (event) => {
 		const local = createLocalBashOperations();
@@ -175,14 +209,18 @@ export default function (pi: ExtensionAPI) {
 			}
 			return;
 		}
-		if (event.toolName === "edit" || event.toolName === "write") {
+		if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "replace" || event.toolName === "substitute") {
 			if (!needsWorktree()) return;
 			const paths =
 				typeof input.path === "string"
 					? [input.path]
 					: typeof input.input === "string"
 						? [...input.input.matchAll(/\[([^\]#\n]+)#/g)].map((match) => match[1] ?? "")
-						: [];
+						: Array.isArray(input.paths)
+							? input.paths.map(String)
+							: event.toolName === "substitute"
+								? ["."]
+								: [];
 			if (paths.some(inMainCheckout)) return { block: true, reason: NEEDS_WORKTREE };
 			return;
 		}
