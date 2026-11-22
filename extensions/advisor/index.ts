@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, AssistantMessage, Message, Model, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, convertToLlm, type ExtensionAPI, type ExtensionContext, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { LEVELS, parseTarget } from "../chains/index.ts";
@@ -16,25 +16,26 @@ export interface AdvisorConfig {
 }
 
 const LGTM = /^\s*LGTM\b/i;
-const MAX_PART = 4000;
 const MAX_NITS = 2;
 const COLLAPSED_LINES = 3;
 // A run that only answered a question needs no second model.
 const ACTING_TOOLS: Record<string, true> = { edit: true, write: true, replace: true, substitute: true, shell: true, codemode: true, subagent: true };
 const POINT = /^[\s>*\-\d.)]*[`*]*(blocker|concern|nit)[`*]*\s*[:.]/i;
 
-const INSTRUCTIONS = `You review a coding agent's finished run. You see the transcript and cannot act. Silence is the default: answer \`LGTM\` alone unless a point below applies. When the agent asks you a question directly, answer the question instead.
+const INSTRUCTIONS = `You review a coding agent's finished run on behalf of its user. You see the agent's instructions and transcript, quoted, and cannot act. Silence is the default: answer \`LGTM\` alone when the agent is on track. When the agent asks you a question directly, answer the question instead.
 
-Report a point only when you can name the transcript evidence and what goes wrong for the user if it is ignored:
-- \`blocker\`: a claim of done that was not exercised, a wrong or contradicted claim, an explicit instruction breached, an irreversible step without approval, a stub in place of the work.
-- \`concern\`: a likely defect or a check too thin for the risk taken.
-- \`nit\`: a real but minor point. At most two.
+The agent's instructions and the user's words bind you too: never flag what they allow or what the user accepted.
 
-Do not report: wording or style, alternative designs, scope size, backwards compatibility nobody required, requests to ask the user for clarification, errors the agent already saw, or anything you raised before. A part marked \`[…]\` is cut, not absent: never claim a check is missing unless you looked for it in the full transcript.
+Report a point only on a concrete technical risk or a failure the transcript shows, one the agent would fix if it saw it. Name the evidence and what goes wrong for the user if it is ignored. Generic uncertainty or vague unease: stay silent.
+- \`blocker\`: a claim of done or verified that the transcript contradicts or never exercised, an explicit instruction breached, an irreversible step without approval, a stub in place of the work, yielding before a stated condition such as green CI is met.
+- \`concern\`: a likely defect, or a guess where a cheap check or a primary source was at hand.
+- \`nit\`: a real but minor point, such as a simpler approach. At most two.
+
+Never report: wording or style, scope or size of the change, backwards compatibility nobody required, requests to ask the user for clarification or confirm scope, errors the agent already saw, reasoning the agent already did, or anything you raised before unless new evidence makes it a blocker. Never second-guess a decision the agent understood and committed to unless you are certain. Cite only what the transcript shows: a tool result that says it was truncated is an excerpt, not the whole output.
 
 At most three blockers and concerns, blockers first, one sentence each plus the evidence. Start each point on its own line with its label and a colon, as in \`concern: …\`.`;
 
-const RESTATE = `Handle these points. Then write your final report again in full. The user reads only your last message: it must stand alone and repeat every result, decision, and approval request that still applies. Say in one line which points you skipped and why.`;
+const RESTATE = `Weigh these points: act on the ones the evidence supports, and reject the others with their evidence in one line each. Then write your final report again in full. The user reads only your last message: it must stand alone and repeat every result, decision, and approval request that still applies.`;
 
 /** Splits advice into the points that restart the agent and the nits that are only shown. Unlabeled advice restarts it. */
 export function parseAdvice(advice: string): { serious: string; nits: string } {
@@ -65,16 +66,13 @@ function card(title: string, body: string, expanded: boolean, theme: Theme) {
 
 type AgentMessageLike = { role: string; content?: unknown; toolName?: string; isError?: boolean };
 
-function clip(text: string): string {
-	return text.length > MAX_PART ? `${text.slice(0, MAX_PART / 2)}\n[…]\n${text.slice(-MAX_PART / 2)}` : text;
-}
-
 function partsText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	return content
-		.map((part: { type?: string; text?: string; name?: string; arguments?: unknown }) => {
+		.map((part: { type?: string; text?: string; thinking?: string; name?: string; arguments?: unknown }) => {
 			if (part.type === "text") return part.text ?? "";
+			if (part.type === "thinking") return part.thinking ? `[thinking] ${part.thinking}` : "";
 			if (part.type === "toolCall") return `[tool call ${part.name}] ${JSON.stringify(part.arguments)}`;
 			if (part.type === "image") return "[image]";
 			return "";
@@ -83,15 +81,14 @@ function partsText(content: unknown): string {
 		.join("\n");
 }
 
-/** Plain-text transcript of agent messages for the advisor. */
+/** Plain-text transcript of model messages for the advisor. */
 export function transcript(messages: readonly AgentMessageLike[]): string {
 	return messages
 		.flatMap((message) => {
-			const text = clip(partsText(message.content));
+			const text = partsText(message.content);
 			if (!text) return [];
 			if (message.role === "toolResult") return [`## tool result ${message.toolName ?? ""}${message.isError ? " (error)" : ""}\n${text}`];
 			if (message.role === "user" || message.role === "assistant") return [`## ${message.role}\n${text}`];
-			if (message.role === "custom") return [`## note\n${text}`];
 			return [];
 		})
 		.join("\n\n");
@@ -121,7 +118,8 @@ export function createAdvisor(config: AdvisorConfig) {
 		let enabled = true;
 		let available: Model<Api>[] = [];
 		let history: Message[] = [];
-		let pending: AgentMessageLike[] = [];
+		// What `history` already covers; a mismatch (compaction, branch change, new prompt, restart) starts it over.
+		let seen: { prompt: string; count: number; last?: number } | undefined;
 		let advisedThisInput = false;
 		let acted = false;
 
@@ -181,8 +179,23 @@ export function createAdvisor(config: AdvisorConfig) {
 			},
 		});
 
-		/** Asks the first target that answers. `usage` covers every attempt, failed ones included. */
-		const ask = async (ctx: ExtensionContext, question: string, signal?: AbortSignal): Promise<{ answer?: string; usage?: Usage }> => {
+		/**
+		 * Asks the first target that answers, sending the agent's system prompt and transcript the first time and only
+		 * what is new afterwards. `usage` covers every attempt, failed ones included.
+		 */
+		const ask = async (ctx: ExtensionContext, request: string, signal?: AbortSignal): Promise<{ answer?: string; usage?: Usage }> => {
+			const prompt = ctx.getSystemPrompt();
+			const context = convertToLlm(buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages);
+			const fresh = !seen || seen.prompt !== prompt || context.length < seen.count || context[seen.count - 1]?.timestamp !== seen.last;
+			if (fresh) history = [];
+			const delta = transcript(fresh ? context : context.slice(seen?.count));
+			const question = [
+				fresh ? `The agent's instructions:\n\n<instructions>\n${prompt}\n</instructions>` : "",
+				delta ? `${fresh ? "The transcript" : "The transcript since your last look"}:\n\n<transcript>\n${delta}\n</transcript>` : "",
+				request,
+			]
+				.filter(Boolean)
+				.join("\n\n");
 			const user: Message = { role: "user", content: question, timestamp: Date.now() };
 			const timeout = AbortSignal.timeout(timeoutMs);
 			const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -201,6 +214,7 @@ export function createAdvisor(config: AdvisorConfig) {
 				if (combined.aborted) return { usage };
 				if (result.stopReason === "error") continue;
 				history = [...history, user, result];
+				seen = { prompt, count: context.length, last: context.at(-1)?.timestamp };
 				return { answer: answerText(result), usage };
 			}
 			return { usage };
@@ -221,25 +235,10 @@ export function createAdvisor(config: AdvisorConfig) {
 		);
 		pi.registerEntryRenderer<string>("advisor-nits", (entry, { expanded }, theme) => card("Advisor nits", entry.data ?? "", expanded, theme));
 
-		pi.on("agent_end", (event) => {
-			pending.push(...event.messages);
-		});
-
-		pi.on("session_compact", () => {
-			history = [];
-		});
-
 		// The last actionable point of a run: the agent continues in the same run and restates its report.
 		pi.on("agent_before_settle", async (event, ctx) => {
-			if (!enabled || event.outcome !== "completed" || advisedThisInput) {
-				pending = [];
-				return;
-			}
-			if (!acted) return;
-			const delta = transcript(pending);
-			pending = [];
-			if (!delta) return;
-			const { answer: advice, usage } = await ask(ctx, `Review this part of the conversation:\n\n${delta}`, ctx.signal).catch((error: Error) => {
+			if (!enabled || event.outcome !== "completed" || advisedThisInput || !acted) return;
+			const { answer: advice, usage } = await ask(ctx, "Review the agent's latest run.", ctx.signal).catch((error: Error) => {
 				if (ctx.hasUI) ctx.ui.notify(`Advisor failed: ${error.message}`, "warning");
 				return { answer: undefined, usage: undefined };
 			});
@@ -264,10 +263,7 @@ export function createAdvisor(config: AdvisorConfig) {
 			parameters: params,
 			exposure: "model-only",
 			async execute(_id, input: Static<typeof params>, signal, _onUpdate, ctx) {
-				const delta = transcript(pending);
-				pending = [];
-				const question = delta ? `Conversation since your last look:\n\n${delta}\n\nQuestion: ${input.question}` : input.question;
-				const { answer, usage } = await ask(ctx, question, signal);
+				const { answer, usage } = await ask(ctx, `Question: ${input.question}`, signal);
 				return { content: [{ type: "text", text: answer ?? "The advisor did not answer (every model failed or timed out)." }], details: undefined, usage };
 			},
 		});
