@@ -202,7 +202,9 @@ export default function (pi: ExtensionAPI) {
 					failedLog = log.trimEnd().split("\n").slice(-LOG_LINES).join("\n");
 					text += `\n\nFailed log tail (${failure.workflowName}):\n${failedLog}`;
 				}
-				const conclusion = failure ? "failure" : runs.length > 0 && runs.every((r) => r.status === "completed") ? "success" : "pending";
+				const finished = runs.length > 0 && runs.every((r) => r.status === "completed");
+				let conclusion = finished ? "success" : "pending";
+				if (failure) conclusion = "failure";
 				const structuredContent: Output = { op: "run_watch", conclusion, runs: runsOf(runs), ...(failedLog ? { failed_log: failedLog } : {}) };
 				return { content: [{ type: "text", text }], details: { runs }, isError: Boolean(failure), structuredContent };
 			};
