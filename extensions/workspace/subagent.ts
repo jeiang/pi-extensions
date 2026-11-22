@@ -92,6 +92,8 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	let next = 1;
 	const waiting: (() => void)[] = [];
 	const children = new Map<string, Child>();
+	/** Detaches every foreground child, so a message the user sends while one runs reaches the model. */
+	const steerable = new Set<() => void>();
 
 	const acquire = async () => {
 		while (active >= limit) {
@@ -167,6 +169,10 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		for (const child of children.values()) child.kill();
 	});
 
+	pi.on("input", (event) => {
+		if (event.streamingBehavior === "steer") for (const detach of steerable) detach();
+	});
+
 	const params = Type.Object({
 		agent: Type.String({ description: `One of: ${agents.map((agent) => agent.name).join(", ")}.` }),
 		task: Type.String({ description: "The whole assignment: the question, the file paths and facts you already have, and what to return." }),
@@ -177,7 +183,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message; at most ${limit} run at once and the rest wait.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
+		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message; at most ${limit} run at once and the rest wait. A message from the user moves a running child to the background.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
 		promptSnippet: `Delegate to a read-only child agent (${agents.map((agent) => agent.name).join(", ")})`,
 		parameters: params,
 		exposure: "model-only",
@@ -186,17 +192,38 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (!agent) throw new Error(`No agent "${input.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			const sessionDir = sessionFile ? join(ctx.sessionManager.getSessionDir(), "subagents", ctx.sessionManager.getSessionId()) : undefined;
-			if (!input.background) {
-				return text(await run(agent, input.task, sessionDir, signal, (line) => onUpdate?.({ content: [{ type: "text", text: line }], details: undefined })));
-			}
-			// A background child outlives the tool call, so the call's signal does not cancel it.
+			const report = (result: Promise<string>) =>
+				void result.then(
+					(answer) => wake(`Subagent ${agent.name} finished:\n${answer}`, false),
+					(error: Error) => wake(`Subagent ${error.message}`, true),
+				);
 			const wake = (content: string, error: boolean) =>
 				pi.sendMessage({ customType: "subagent", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
-			void run(agent, input.task, sessionDir, undefined).then(
-				(answer) => wake(`Subagent ${agent.name} finished:\n${answer}`, false),
-				(error: Error) => wake(`Subagent ${error.message}`, true),
-			);
-			return text(`Launched ${agent.name} in the background; you are woken with its result or its failure.`);
+			if (input.background) {
+				// A background child outlives the tool call, so the call's signal does not cancel it.
+				report(run(agent, input.task, sessionDir, undefined));
+				return text(`Launched ${agent.name} in the background; you are woken with its result or its failure.`);
+			}
+			const controller = new AbortController();
+			const cancel = () => controller.abort();
+			if (signal?.aborted) cancel();
+			signal?.addEventListener("abort", cancel, { once: true });
+			let attached = true;
+			const result = run(agent, input.task, sessionDir, controller.signal, (line) => {
+				if (attached) onUpdate?.({ content: [{ type: "text", text: line }], details: undefined });
+			});
+			const steered = Promise.withResolvers<void>();
+			steerable.add(steered.resolve);
+			try {
+				const answer = await Promise.race([result, steered.promise]);
+				if (typeof answer === "string") return text(answer);
+			} finally {
+				attached = false;
+				steerable.delete(steered.resolve);
+				signal?.removeEventListener("abort", cancel);
+			}
+			report(result);
+			return text(`The user sent a message; ${agent.name} moved to the background and you are woken with its result or its failure.`);
 		},
 	});
 

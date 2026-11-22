@@ -145,6 +145,8 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 	const ops = createLocalBashOperations();
 	const logDir = join(tmpdir(), "pi-shell");
 	let next = 1;
+	/** Ends every wait in progress, so a message the user sends while a command runs reaches the model. */
+	const steerable = new Set<() => void>();
 
 	const wake = (content: string, error = false) =>
 		pi.sendMessage({ customType: "shell-job", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
@@ -203,24 +205,27 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return job;
 	};
 
-	/** Resolves when a line matches `pattern`, after `seconds`, or when the job ends, whichever is first. */
+	/** Resolves when a line matches `pattern`, after `seconds`, when the job ends, or when the user steers, whichever is first. */
 	const waitFor = (job: Job, pattern: RegExp | undefined, seconds: number | undefined, signal: AbortSignal | undefined) => {
-		type Why = "match" | "time" | "exit" | "abort";
+		type Why = "match" | "time" | "exit" | "abort" | "message";
 		const { promise, resolve } = Promise.withResolvers<Why>();
 		let timer: NodeJS.Timeout | undefined;
 		const onLine = (line: string) => {
 			if (pattern?.test(line)) finish("match");
 		};
 		const onAbort = () => finish("abort");
+		const onSteer = () => finish("message");
 		const finish = (why: Why) => {
 			job.listeners.delete(onLine);
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
+			steerable.delete(onSteer);
 			resolve(why);
 		};
 		if (pattern) job.listeners.add(onLine);
 		if (seconds !== undefined) timer = setTimeout(() => finish("time"), seconds * 1000);
 		signal?.addEventListener("abort", onAbort, { once: true });
+		steerable.add(onSteer);
 		void job.done.then(() => finish("exit"));
 		return promise;
 	};
@@ -261,11 +266,15 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		for (const job of jobs.values()) if (job.status === "running") job.controller.abort();
 	});
 
+	pi.on("input", (event) => {
+		if (event.streamingBehavior === "steer") for (const end of steerable) end();
+	});
+
 	pi.registerTool({
 		name: "shell",
 		label: "Shell",
 		description:
-			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout` moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Read and search files with read/grep, not shell.",
+			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout`, or when the user sends a message, moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Read and search files with read/grep, not shell.",
 		promptSnippet: "Run processes (builds, tests, git, nix, ssh); background jobs with early return",
 		parameters: params,
 		exposure: "model-only",
@@ -322,7 +331,8 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			}
 			if (pattern) watchLater(job, pattern);
 			reportExit(job);
-			return progress(job, why === "match" ? "Matched; still running." : "Still running; moved to the background.");
+			const moved = why === "match" ? "Matched; still running." : why === "message" ? "The user sent a message; moved to the background." : "Still running; moved to the background.";
+			return progress(job, moved);
 		},
 	});
 }
