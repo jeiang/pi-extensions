@@ -70,9 +70,12 @@ test("a repository made during the session gets worktrees but no write block", a
 	assert.equal(readFileSync(join(dir, ".worktrees", "proto", "b.txt"), "utf8"), "b\n");
 });
 
-test("a nested repository in the main checkout is neither blocked nor remapped", async () => {
+test("a nested clone in the main checkout is neither blocked nor remapped; a submodule is", async () => {
 	const dir = repo();
+	mkdirSync(join(dir, "mod"));
+	writeFileSync(join(dir, "mod", ".git"), "gitdir: ../.git/modules/mod\n");
 	const { session: s } = await session(dir, [
+		{ tool: "write", args: { path: "mod/c.txt", content: "c\n" } },
 		{ tool: "bash", args: { command: "git init -q nested" } },
 		{ tool: "write", args: { path: "nested/a.txt", content: "a\n" } },
 		{ tool: "worktree", args: { action: "create", name: "wt" } },
@@ -82,6 +85,7 @@ test("a nested repository in the main checkout is neither blocked nor remapped",
 	s.dispose();
 	assert.equal(readFileSync(join(dir, "nested", "a.txt"), "utf8"), "a\n");
 	assert.equal(readFileSync(join(dir, "nested", "b.txt"), "utf8"), "b\n");
+	assert.match(toolResults(s)[0] ?? "", /worktree tool first/);
 });
 
 test("carry moves edited and new files out of the main checkout into the worktree", async () => {
