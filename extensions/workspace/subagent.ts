@@ -182,15 +182,26 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		task: Type.String({ description: "The whole assignment: the question, the file paths and facts you already have, and what to return." }),
 		background: Type.Optional(Type.Boolean({ description: "Return at once; you are woken with the result." })),
 	});
-	const text = (value: string, usage?: Usage, isError?: boolean): AgentToolResult<undefined> => ({ content: [{ type: "text", text: value }], details: undefined, usage, isError });
+	const outputSchema = Type.Object({
+		agent: Type.String(),
+		status: Type.String({ description: "done, failed, or background (you are woken with the result later)" }),
+		answer: Type.String({ description: "The child's final answer, or why it failed." }),
+	});
+	const text = (value: string, agent: string, status: "done" | "failed" | "background", usage?: Usage): AgentToolResult<undefined> & { structuredContent: Static<typeof outputSchema> } => ({
+		content: [{ type: "text", text: value }],
+		details: undefined,
+		usage,
+		isError: status === "failed",
+		structuredContent: { agent, status, answer: status === "background" ? "" : value },
+	});
 
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message; at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
+		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message, or Promise.all in a script; at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background. Scripts get { agent, status, answer }.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
 		promptSnippet: `Delegate to a read-only child agent (${agents.map((agent) => agent.name).join(", ")})`,
 		parameters: params,
-		exposure: "model-only",
+		outputSchema,
 		async execute(_id, input: Static<typeof params>, signal, onUpdate, ctx) {
 			const agent = agents.find((candidate) => candidate.name === input.agent);
 			if (!agent) throw new Error(`No agent "${input.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
@@ -206,16 +217,16 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (input.background) {
 				// A background child outlives the tool call, so the call's signal does not cancel it.
 				report(run(agent, input.task, sessionDir, undefined));
-				return text(`Launched ${agent.name} in the background; you are woken with its result or its failure.`);
+				return text(`Launched ${agent.name} in the background; you are woken with its result or its failure.`, agent.name, "background");
 			}
 			const outcome = await untilInterrupt(signal, (childSignal, attached) =>
 				run(agent, input.task, sessionDir, childSignal, (line) => {
 					if (attached()) onUpdate?.({ content: [{ type: "text", text: line }], details: undefined });
 				}),
 			);
-			if ("value" in outcome) return text(outcome.value.text, outcome.value.usage, outcome.value.failed);
+			if ("value" in outcome) return text(outcome.value.text, agent.name, outcome.value.failed ? "failed" : "done", outcome.value.usage);
 			report(outcome.background);
-			return text(`The user interrupted; ${agent.name} moved to the background and you are woken with its result or its failure.`);
+			return text(`The user interrupted; ${agent.name} moved to the background and you are woken with its result or its failure.`, agent.name, "background");
 		},
 	});
 
