@@ -85,7 +85,7 @@ export default function (pi: ExtensionAPI) {
 			if (violation && !(await allow(ctx, "Allow blocked command?", `${violation}\n\n${command}`))) {
 				return { block: true, reason: `${violation} If the user asked for it, ask them to run it.` };
 			}
-			const folder = commandMentionsRestricted(command);
+			const folder = commandMentionsRestricted(command) ?? (typeof input.cwd === "string" ? restrictedFolder(input.cwd, sessionDir(ctx)) : undefined);
 			if (folder && !(await allow(ctx, `Allow access to ${folder}?`, command))) {
 				return { block: true, reason: `${folder} is restricted. Ask the user before touching it.` };
 			}
