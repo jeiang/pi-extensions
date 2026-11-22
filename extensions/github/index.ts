@@ -62,7 +62,9 @@ const outputSchema = Type.Object({
 			checks: Type.Array(check),
 		}),
 	),
-	conclusion: Type.Optional(Type.String({ description: "run_watch: success, failure, none (no runs yet), or background (the user interrupted; you are woken later)." })),
+	conclusion: Type.Optional(
+		Type.String({ description: "run_watch: success, failure, pending (stopped before every run finished), none (no runs yet), or background (the user interrupted; you are woken later)." }),
+	),
 	runs: Type.Optional(
 		Type.Array(
 			Type.Object({ id: Type.Number(), workflow: Type.String(), status: Type.String(), conclusion: Type.Union([Type.String(), Type.Null()]), url: Type.String(), failed_jobs: Type.Array(Type.String()) }),
@@ -192,14 +194,16 @@ export default function (pi: ExtensionAPI) {
 					await sleep(POLL_MS, undefined, { signal }).catch(() => undefined);
 				}
 				let text = renderRuns(runs, undefined, false);
-				const failure = runs.find((r) => r.jobs.some(failed));
+				// A run can fail with no failed job, for example an invalid workflow file.
+				const failure = runs.find((r) => failed(r) || r.jobs.some(failed));
 				let failedLog: string | undefined;
 				if (failure) {
 					const log = await ghText(cwd, ["run", "view", String(failure.databaseId), "--log-failed"]).catch((error: Error) => error.message);
 					failedLog = log.trimEnd().split("\n").slice(-LOG_LINES).join("\n");
 					text += `\n\nFailed log tail (${failure.workflowName}):\n${failedLog}`;
 				}
-				const structuredContent: Output = { op: "run_watch", conclusion: failure ? "failure" : "success", runs: runsOf(runs), ...(failedLog ? { failed_log: failedLog } : {}) };
+				const conclusion = failure ? "failure" : runs.every((r) => r.status === "completed") ? "success" : "pending";
+				const structuredContent: Output = { op: "run_watch", conclusion, runs: runsOf(runs), ...(failedLog ? { failed_log: failedLog } : {}) };
 				return { content: [{ type: "text", text }], details: { runs }, isError: Boolean(failure), structuredContent };
 			};
 			const outcome = await untilInterrupt(signal, (own, attached) => watch(AbortSignal.any([own, shutdown.signal]), attached));
