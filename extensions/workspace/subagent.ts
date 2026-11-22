@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type AgentToolResult, type ExtensionAPI, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
+import { untilInterrupt } from "./interrupt.ts";
 
 const DEFAULT_MAX_CONCURRENT = 3;
 const STDERR_TAIL_LINES = 20;
@@ -177,7 +178,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message; at most ${limit} run at once and the rest wait.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
+		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message; at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
 		promptSnippet: `Delegate to a read-only child agent (${agents.map((agent) => agent.name).join(", ")})`,
 		parameters: params,
 		exposure: "model-only",
@@ -186,17 +187,26 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (!agent) throw new Error(`No agent "${input.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			const sessionDir = sessionFile ? join(ctx.sessionManager.getSessionDir(), "subagents", ctx.sessionManager.getSessionId()) : undefined;
-			if (!input.background) {
-				return text(await run(agent, input.task, sessionDir, signal, (line) => onUpdate?.({ content: [{ type: "text", text: line }], details: undefined })));
-			}
-			// A background child outlives the tool call, so the call's signal does not cancel it.
+			const report = (result: Promise<string>) =>
+				void result.then(
+					(answer) => wake(`Subagent ${agent.name} finished:\n${answer}`, false),
+					(error: Error) => wake(`Subagent ${error.message}`, true),
+				);
 			const wake = (content: string, error: boolean) =>
 				pi.sendMessage({ customType: "subagent", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
-			void run(agent, input.task, sessionDir, undefined).then(
-				(answer) => wake(`Subagent ${agent.name} finished:\n${answer}`, false),
-				(error: Error) => wake(`Subagent ${error.message}`, true),
+			if (input.background) {
+				// A background child outlives the tool call, so the call's signal does not cancel it.
+				report(run(agent, input.task, sessionDir, undefined));
+				return text(`Launched ${agent.name} in the background; you are woken with its result or its failure.`);
+			}
+			const outcome = await untilInterrupt(signal, (childSignal, attached) =>
+				run(agent, input.task, sessionDir, childSignal, (line) => {
+					if (attached()) onUpdate?.({ content: [{ type: "text", text: line }], details: undefined });
+				}),
 			);
-			return text(`Launched ${agent.name} in the background; you are woken with its result or its failure.`);
+			if ("value" in outcome) return text(outcome.value);
+			report(outcome.background);
+			return text(`The user interrupted; ${agent.name} moved to the background and you are woken with its result or its failure.`);
 		},
 	});
 

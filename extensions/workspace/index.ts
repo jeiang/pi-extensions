@@ -16,6 +16,7 @@ import { type Static, type TObject, Type } from "typebox";
 import { setSessionDir } from "./cwd.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
+import { registerInterrupt } from "./interrupt.ts";
 import { registerShell } from "./shell.ts";
 import { registerSubagent } from "./subagent.ts";
 import {
@@ -118,23 +119,16 @@ export default function (pi: ExtensionAPI) {
 	override((dir) => createFindToolDefinition(dir), { exposure: "codemode" });
 	override((dir) => createLsToolDefinition(dir), { exposure: "codemode" });
 
+	const shell = registerShell(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
 	const bashTemplate = createBashToolDefinition(sessionCwd);
 	pi.registerTool({
 		...bashTemplate,
+		description: `${bashTemplate.description} If the user interrupts, the call rejects with the job id, which ends the script unless it catches the error, and the command keeps running as a shell job.`,
 		exposure: "codemode",
-		async execute(id, params, signal, onUpdate, ctx) {
-			const dir = cwd();
-			const shellEnv = await env(dir);
-			const tool = createBashToolDefinition(dir, { spawnHook: (spawn) => ({ ...spawn, env: { ...spawn.env, ...shellEnv } }) });
-			const result = await tool.execute(id, params, signal, onUpdate, inCwd(ctx, dir));
-			const error = devshellErrors.get(dir);
-			if (error) result.content = [{ type: "text", text: `devshell failed, ran without it:\n${error}` }, ...result.content];
-			return result;
-		},
+		execute: (_id, params, signal, onUpdate) => shell.bash(params, signal, onUpdate),
 	});
-
-	registerShell(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
 	registerSubagent(pi, { cwd, env });
+	registerInterrupt(pi);
 
 	pi.on("user_bash", async (event) => {
 		const local = createLocalBashOperations();

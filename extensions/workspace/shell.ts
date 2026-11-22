@@ -3,16 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type AgentToolResult,
+	type AgentToolUpdateCallback,
 	createLocalBashOperations,
 	type ExtensionAPI,
 	type ExtensionToolContext,
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
+import { onInterrupt } from "./interrupt.ts";
 
 const DEFAULT_TIMEOUT_S = 120;
 const TAIL_LINES = 30;
 const MAX_WAKES = 5;
+/** pi's limit on the `output` codemode scripts get from `bash`. */
+const STRUCTURED_MAX_BYTES = 1024 * 1024;
 
 interface Job {
 	id: string;
@@ -145,6 +149,14 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 	const ops = createLocalBashOperations();
 	const logDir = join(tmpdir(), "pi-shell");
 	let next = 1;
+	/** The exit result of a foreground command; the job is done and forgotten. */
+	const finished = (job: Job) => {
+		jobs.delete(job.id);
+		const truncated = truncateTail(readLog(job));
+		const note = truncated.truncated ? `\n[output truncated, full log: ${job.log}]` : "";
+		const status = job.status === "exited" ? (job.exitCode === 0 ? "" : `\nCommand exited with code ${job.exitCode}`) : `\n[${job.status}]`;
+		return { content: [{ type: "text" as const, text: `${truncated.content}${note}${status}`.trim() || "(no output)" }], details: undefined, isError: job.status !== "exited" || job.exitCode !== 0 };
+	};
 
 	const wake = (content: string, error = false) =>
 		pi.sendMessage({ customType: "shell-job", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
@@ -203,9 +215,9 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return job;
 	};
 
-	/** Resolves when a line matches `pattern`, after `seconds`, or when the job ends, whichever is first. */
+	/** Resolves when a line matches `pattern`, after `seconds`, when the job ends, or when the user interrupts, whichever is first. */
 	const waitFor = (job: Job, pattern: RegExp | undefined, seconds: number | undefined, signal: AbortSignal | undefined) => {
-		type Why = "match" | "time" | "exit" | "abort";
+		type Why = "match" | "time" | "exit" | "abort" | "interrupt";
 		const { promise, resolve } = Promise.withResolvers<Why>();
 		let timer: NodeJS.Timeout | undefined;
 		const onLine = (line: string) => {
@@ -216,13 +228,28 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			job.listeners.delete(onLine);
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
+			stopInterrupt();
 			resolve(why);
 		};
 		if (pattern) job.listeners.add(onLine);
 		if (seconds !== undefined) timer = setTimeout(() => finish("time"), seconds * 1000);
 		signal?.addEventListener("abort", onAbort, { once: true });
+		const stopInterrupt = onInterrupt(() => finish("interrupt"));
 		void job.done.then(() => finish("exit"));
 		return promise;
+	};
+
+	/** Streams the job's output to `onUpdate`; returns the function that stops. */
+	const follow = (job: Job, onUpdate: AgentToolUpdateCallback<undefined> | undefined) => {
+		const live: string[] = [];
+		const stream = (line: string, replaces: boolean) => {
+			if (replaces && live.length > 0) live[live.length - 1] = line;
+			else if (live.push(line) > 200) live.shift();
+			const bar = progressBar(line);
+			onUpdate?.({ content: [{ type: "text", text: bar ? `${live.join("\n")}\n${bar}` : live.join("\n") }], details: undefined });
+		};
+		job.listeners.add(stream);
+		return () => job.listeners.delete(stream);
 	};
 
 	const watchLater = (job: Job, pattern: RegExp) => {
@@ -261,11 +288,43 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		for (const job of jobs.values()) if (job.status === "running") job.controller.abort();
 	});
 
+	/** The codemode `bash` tool: pi's result shape, run as a job so that an interrupt leaves the command running. */
+	const bash = async (input: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<undefined> | undefined) => {
+		const job = await start(input.command, options.cwd());
+		const unfollow = follow(job, onUpdate);
+		const why = await waitFor(job, undefined, input.timeout, signal);
+		unfollow();
+		if (why === "interrupt") {
+			reportExit(job);
+			// Throwing ends the calling script, so its later steps cannot run while this command still does.
+			const moved = progress(job, "The user interrupted; moved to the background. The shell tool can read, wait on, or kill this job.");
+			throw new Error(moved.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
+		}
+		if (why !== "exit") {
+			job.controller.abort();
+			await job.done;
+			jobs.delete(job.id);
+			const status = why === "abort" ? "Command aborted" : `Command timed out after ${input.timeout} seconds`;
+			throw new Error(`${truncateTail(readLog(job)).content}\n\n${status}`);
+		}
+		const result = finished(job);
+		if (job.status !== "exited" || job.exitCode == null) throw new Error(result.content[0]?.text);
+		const full = truncateTail(readLog(job), { maxBytes: STRUCTURED_MAX_BYTES, maxLines: Number.MAX_SAFE_INTEGER });
+		const structuredContent = {
+			output: full.content,
+			truncated: full.truncated,
+			...(full.truncated ? { full_output_path: job.log } : {}),
+			exit_code: job.exitCode,
+			wall_time_seconds: Math.round(((job.ended ?? Date.now()) - job.started) / 100) / 10,
+		};
+		return { ...result, structuredContent };
+	};
+
 	pi.registerTool({
 		name: "shell",
 		label: "Shell",
 		description:
-			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout` moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Read and search files with read/grep, not shell.",
+			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout`, or when the user interrupts, moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Read and search files with read/grep, not shell.",
 		promptSnippet: "Run processes (builds, tests, git, nix, ssh); background jobs with early return",
 		parameters: params,
 		exposure: "model-only",
@@ -296,33 +355,22 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 				reportExit(job);
 				return text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`);
 			}
-			const live: string[] = [];
-			const stream = (line: string, replaces: boolean) => {
-				if (replaces && live.length > 0) live[live.length - 1] = line;
-				else if (live.push(line) > 200) live.shift();
-				const bar = progressBar(line);
-				onUpdate?.({ content: [{ type: "text", text: bar ? `${live.join("\n")}\n${bar}` : live.join("\n") }], details: undefined });
-			};
-			job.listeners.add(stream);
+			const unfollow = follow(job, onUpdate);
 			const seconds = input.background ? input.wait_seconds : (input.wait_seconds ?? input.timeout ?? DEFAULT_TIMEOUT_S);
 			const why = await waitFor(job, pattern, seconds, signal);
-			job.listeners.delete(stream);
+			unfollow();
 			if (why === "abort") {
 				job.controller.abort();
 				await job.done;
 				return progress(job, "Cancelled.");
 			}
-			if (why === "exit") {
-				jobs.delete(job.id);
-				const output = readLog(job);
-				const truncated = truncateTail(output);
-				const note = truncated.truncated ? `\n[output truncated, full log: ${job.log}]` : "";
-				const status = job.status === "exited" ? (job.exitCode === 0 ? "" : `\nCommand exited with code ${job.exitCode}`) : `\n[${job.status}]`;
-				return { content: [{ type: "text", text: `${truncated.content}${note}${status}`.trim() || "(no output)" }], details: undefined, isError: job.status !== "exited" || job.exitCode !== 0 };
-			}
+			if (why === "exit") return finished(job);
 			if (pattern) watchLater(job, pattern);
 			reportExit(job);
-			return progress(job, why === "match" ? "Matched; still running." : "Still running; moved to the background.");
+			const moved = why === "match" ? "Matched; still running." : why === "interrupt" ? "The user interrupted; moved to the background." : "Still running; moved to the background.";
+			return progress(job, moved);
 		},
 	});
+
+	return { bash };
 }

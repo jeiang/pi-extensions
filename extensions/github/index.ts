@@ -6,6 +6,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { formatDuration } from "../turn-time/index.ts";
 import { sessionDir } from "../workspace/cwd.ts";
+import { registerInterrupt, untilInterrupt } from "../workspace/interrupt.ts";
 
 const run = promisify(execFile);
 const POLL_MS = 15_000;
@@ -87,11 +88,14 @@ export function renderRuns(runs: RunView[], theme?: Theme, expanded = false): st
 }
 
 export default function (pi: ExtensionAPI) {
+	const shutdown = new AbortController();
+	pi.on("session_shutdown", () => shutdown.abort());
+	registerInterrupt(pi);
 	pi.registerTool<typeof params, Details>({
 		name: "github",
 		label: "GitHub",
 		description:
-			"Watch GitHub Actions runs until they finish, failing fast with the failed job's log tail (run_watch), or show a pull request's state and checks (pr_view). Use `gh` through shell for everything else.",
+			"Watch GitHub Actions runs until they finish, failing fast with the failed job's log tail (run_watch), or show a pull request's state and checks (pr_view). If the user interrupts run_watch, it keeps watching in the background and wakes you with the outcome. Use `gh` through shell for everything else.",
 		promptSnippet: "Watch CI runs (fail fast, failed log tail) and view PR state",
 		parameters: params,
 		exposure: "model-only",
@@ -115,21 +119,35 @@ export default function (pi: ExtensionAPI) {
 				ids = listed.map((r) => String(r.databaseId));
 				if (ids.length === 0) return { content: [{ type: "text", text: `No runs for ${sha} yet.` }], details: { runs: [] } };
 			}
-			let runs: RunView[] = [];
-			while (!signal?.aborted) {
-				runs = await Promise.all(ids.map((id) => gh<RunView>(cwd, ["run", "view", id, "--json", RUN_FIELDS])));
-				onUpdate?.({ content: [{ type: "text", text: renderRuns(runs) }], details: { runs } });
+			const watch = async (signal: AbortSignal, attached: () => boolean): Promise<AgentToolResult<Details>> => {
+				let runs: RunView[] = [];
+				while (!signal.aborted) {
+					runs = await Promise.all(ids.map((id) => gh<RunView>(cwd, ["run", "view", id, "--json", RUN_FIELDS])));
+					if (attached()) onUpdate?.({ content: [{ type: "text", text: renderRuns(runs) }], details: { runs } });
+					const failure = runs.find((r) => r.jobs.some(failed));
+					if (failure || runs.every((r) => r.status === "completed")) break;
+					await sleep(POLL_MS, undefined, { signal }).catch(() => undefined);
+				}
+				let text = renderRuns(runs, undefined, false);
 				const failure = runs.find((r) => r.jobs.some(failed));
-				if (failure || runs.every((r) => r.status === "completed")) break;
-				await sleep(POLL_MS, undefined, { signal }).catch(() => undefined);
-			}
-			let text = renderRuns(runs, undefined, false);
-			const failure = runs.find((r) => r.jobs.some(failed));
-			if (failure) {
-				const log = await ghText(cwd, ["run", "view", String(failure.databaseId), "--log-failed"]).catch((error: Error) => error.message);
-				text += `\n\nFailed log tail (${failure.workflowName}):\n${log.trimEnd().split("\n").slice(-LOG_LINES).join("\n")}`;
-			}
-			return { content: [{ type: "text", text }], details: { runs }, isError: Boolean(failure) };
+				if (failure) {
+					const log = await ghText(cwd, ["run", "view", String(failure.databaseId), "--log-failed"]).catch((error: Error) => error.message);
+					text += `\n\nFailed log tail (${failure.workflowName}):\n${log.trimEnd().split("\n").slice(-LOG_LINES).join("\n")}`;
+				}
+				return { content: [{ type: "text", text }], details: { runs }, isError: Boolean(failure) };
+			};
+			const outcome = await untilInterrupt(signal, (own, attached) => watch(AbortSignal.any([own, shutdown.signal]), attached));
+			if ("value" in outcome) return outcome.value;
+			const wake = (content: string, error: boolean) =>
+				pi.sendMessage({ customType: "github", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
+			void outcome.background.then(
+				(result) => {
+					if (shutdown.signal.aborted) return;
+					wake(`CI watch finished:\n${result.content.map((part) => (part.type === "text" ? part.text : "")).join("")}`, Boolean(result.isError));
+				},
+				(error: Error) => wake(`CI watch failed: ${error.message}`, true),
+			);
+			return { content: [{ type: "text", text: "The user interrupted; still watching CI in the background. You are woken with the outcome." }], details: { runs: [] } };
 		},
 		renderResult(result, options, theme) {
 			const runs = result.details?.runs ?? [];
