@@ -226,5 +226,3 @@ export function remapPath(path: string, root: string, worktree: string): string 
 	const rel = checkoutRelative(raw, root);
 	return rel === undefined ? raw : join(worktree, rel);
 }
-
-export const GIT_MUTATION = /\bgit\s+(add|commit|checkout|switch|merge|rebase|reset|stash|cherry-pick|revert|am|restore|branch\s+-[dDmM]|worktree\s+remove)\b/;

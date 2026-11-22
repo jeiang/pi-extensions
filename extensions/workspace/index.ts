@@ -29,7 +29,6 @@ import {
 	detectRepo,
 	enterWorktree,
 	fastForwardMain,
-	GIT_MUTATION,
 	ownWorktrees,
 	pruneWorktrees,
 	type Repo,
@@ -224,12 +223,6 @@ export default function (pi: ExtensionAPI) {
 			if (paths.some(inMainCheckout)) return { block: true, reason: NEEDS_WORKTREE };
 			return;
 		}
-		if (event.toolName !== "bash" && event.toolName !== "shell") return;
-		const command = input.command;
-		if (typeof command !== "string") return;
-		if (typeof input.cwd === "string" && !inMainCheckout(cwd(input.cwd))) return;
-		if (!needsWorktree() || !GIT_MUTATION.test(command) || /\bcd\s|\bgit\s+-C\s/.test(command)) return;
-		return { block: true, reason: NEEDS_WORKTREE };
 	});
 
 	pi.on("tool_result", async (event) => {
@@ -301,7 +294,7 @@ export default function (pi: ExtensionAPI) {
 		name: "worktree",
 		label: "Worktree",
 		description:
-			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, the current one included, and those branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes and git commands in the main checkout are blocked until create or enter.",
+			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, the current one included, and those branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes in the main checkout are blocked until create or enter.",
 		promptSnippet: "Create, enter, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
 		parameters: worktreeParams,
 		exposure: "model-only",

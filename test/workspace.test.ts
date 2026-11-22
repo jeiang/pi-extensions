@@ -54,17 +54,6 @@ test("writes to the main checkout are blocked until a worktree exists, then land
 	assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: worktree, encoding: "utf8" }).trim(), "add-a");
 });
 
-test("git mutations in the main checkout are blocked until a worktree exists", async () => {
-	const dir = repo();
-	const { session: s } = await session(dir, [
-		{ tool: "bash", args: { command: "touch x && git add x && git commit -qm x" } },
-	]);
-	await s.prompt("commit");
-	s.dispose();
-	assert.match(toolResults(s)[0] ?? "", /worktree tool first/);
-	assert.equal(execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), "1");
-});
-
 test("carry moves edited and new files out of the main checkout into the worktree", async () => {
 	const dir = repo();
 	const wt = await createWorktree(dir, "carry");
