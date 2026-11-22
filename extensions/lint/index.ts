@@ -49,7 +49,7 @@ function diffOf(details: unknown): string | undefined {
 
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", (event) => {
-		if (event.isError || (event.toolName !== "edit" && event.toolName !== "write")) return;
+		if (event.isError || (event.toolName !== "edit" && event.toolName !== "write" && event.toolName !== "replace")) return;
 		const lines =
 			event.toolName === "write"
 				? typeof event.input.content === "string"

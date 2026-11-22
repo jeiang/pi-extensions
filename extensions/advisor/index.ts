@@ -20,7 +20,7 @@ const MAX_PART = 4000;
 const MAX_NITS = 2;
 const COLLAPSED_LINES = 3;
 // A run that only answered a question needs no second model.
-const ACTING_TOOLS: Record<string, true> = { edit: true, write: true, shell: true, codemode: true, subagent: true };
+const ACTING_TOOLS: Record<string, true> = { edit: true, write: true, replace: true, substitute: true, shell: true, codemode: true, subagent: true };
 const POINT = /^[\s>*\-\d.)]*[`*]*(blocker|concern|nit)[`*]*\s*[:.]/i;
 
 const INSTRUCTIONS = `You review a coding agent's finished run. You see the transcript and cannot act. Silence is the default: answer \`LGTM\` alone unless a point below applies. When the agent asks you a question directly, answer the question instead.
