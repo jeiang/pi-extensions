@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { usageLevel, usageShared } from "../usage/index.ts";
 import { sessionDir } from "../workspace/cwd.ts";
+import { costBreakdown, SOURCES, type Totals } from "./cost.ts";
 
 const SEPARATOR = " \ue0b1 ";
 const THINKING: Record<string, string> = {
@@ -48,7 +49,7 @@ export default function (pi: ExtensionAPI) {
 	let git: GitState | undefined;
 	let gitRunning = false;
 	let gitStale = false;
-	let totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	let totals: Totals = costBreakdown([]).total;
 	let requestRender: (() => void) | undefined;
 
 	// Off the render path: git status can be slow on a large repository, so the footer draws the last result.
@@ -70,16 +71,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const recount = (ctx: ExtensionContext) => {
-		totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const { usage } = entry.message;
-			totals.input += usage.input;
-			totals.output += usage.output;
-			totals.cacheRead += usage.cacheRead;
-			totals.cacheWrite += usage.cacheWrite;
-			totals.cost += usage.cost.total;
-		}
+		totals = costBreakdown(ctx.sessionManager.getBranch()).total;
 	};
 
 	const segments = (ctx: ExtensionContext, theme: Theme, statuses: ReadonlyMap<string, string>, fallbackBranch: string | null): string[] => {
@@ -187,6 +179,20 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode === "tui" && CHANGES_FILES[event.toolName]) refreshGit(ctx);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
-		if (ctx.mode === "tui") refreshGit(ctx);
+		if (ctx.mode !== "tui") return;
+		// The advisor records its review's usage after the last turn ends.
+		recount(ctx);
+		refreshGit(ctx);
+	});
+
+	pi.registerCommand("cost", {
+		description: "Show the cost and tokens of this branch per source: main agent, advisor, subagents, tools, and other (compaction, summaries)",
+		handler: async (_args, ctx) => {
+			const { total, sources } = costBreakdown(ctx.sessionManager.getBranch());
+			const row = (name: string, part: Totals) =>
+				`${name.padEnd(9)} $${part.cost.toFixed(2).padStart(7)}  in ${count(part.input)} out ${count(part.output)} cache R ${count(part.cacheRead)} W ${count(part.cacheWrite)}`;
+			const rows = SOURCES.filter((source) => sources[source].cost || sources[source].input || sources[source].output).map((source) => row(source, sources[source]));
+			ctx.ui.notify([row("total", total), ...rows].join("\n"), "info");
+		},
 	});
 }

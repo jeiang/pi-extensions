@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { parseTarget } from "../chains/index.ts";
+import { addUsage } from "../footer/cost.ts";
 
 export interface AdvisorConfig {
 	/** `provider/model:level` targets tried in order until one answers. */
@@ -111,10 +112,12 @@ export function createAdvisor(config: AdvisorConfig) {
 		let advisedThisInput = false;
 		let acted = false;
 
-		const ask = async (ctx: ExtensionContext, question: string, signal?: AbortSignal): Promise<string | undefined> => {
+		/** Asks the first target that answers. `usage` covers every attempt, failed ones included. */
+		const ask = async (ctx: ExtensionContext, question: string, signal?: AbortSignal): Promise<{ answer?: string; usage?: Usage }> => {
 			const user: Message = { role: "user", content: question, timestamp: Date.now() };
 			const timeout = AbortSignal.timeout(timeoutMs);
 			const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+			let usage: Usage | undefined;
 			for (const target of targets) {
 				const model = ctx.modelRegistry.find(target.provider, target.id);
 				if (!model) continue;
@@ -125,12 +128,13 @@ export function createAdvisor(config: AdvisorConfig) {
 						{ reasoning: target.thinkingLevel === "off" ? undefined : target.thinkingLevel, signal: combined },
 					)
 					.result();
-				if (combined.aborted) return undefined;
+				usage = addUsage(usage, result.usage);
+				if (combined.aborted) return { usage };
 				if (result.stopReason === "error") continue;
 				history = [...history, user, result];
-				return answerText(result);
+				return { answer: answerText(result), usage };
 			}
-			return undefined;
+			return { usage };
 		};
 
 		pi.on("input", () => {
@@ -166,13 +170,14 @@ export function createAdvisor(config: AdvisorConfig) {
 			const delta = transcript(pending);
 			pending = [];
 			if (!delta) return;
-			const advice = await ask(ctx, `Review this part of the conversation:\n\n${delta}`, ctx.signal).catch((error: Error) => {
+			const { answer: advice, usage } = await ask(ctx, `Review this part of the conversation:\n\n${delta}`, ctx.signal).catch((error: Error) => {
 				if (ctx.hasUI) ctx.ui.notify(`Advisor failed: ${error.message}`, "warning");
-				return undefined;
+				return { answer: undefined, usage: undefined };
 			});
-			if (!advice || LGTM.test(advice)) return;
-			const { serious, nits } = parseAdvice(advice);
 			const entries = [...event.entries];
+			if (usage) entries.push({ type: "custom", customType: "advisor-usage", data: usage });
+			if (!advice || LGTM.test(advice)) return { entries };
+			const { serious, nits } = parseAdvice(advice);
 			if (nits) entries.push({ type: "custom", customType: "advisor-nits", data: nits });
 			if (!serious) return { entries };
 			advisedThisInput = true;
@@ -193,8 +198,8 @@ export function createAdvisor(config: AdvisorConfig) {
 				const delta = transcript(pending);
 				pending = [];
 				const question = delta ? `Conversation since your last look:\n\n${delta}\n\nQuestion: ${input.question}` : input.question;
-				const answer = await ask(ctx, question, signal);
-				return { content: [{ type: "text", text: answer ?? "The advisor did not answer (every model failed or timed out)." }], details: undefined };
+				const { answer, usage } = await ask(ctx, question, signal);
+				return { content: [{ type: "text", text: answer ?? "The advisor did not answer (every model failed or timed out)." }], details: undefined, usage };
 			},
 		});
 	};

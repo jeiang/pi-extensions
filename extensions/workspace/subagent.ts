@@ -2,8 +2,10 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { Usage } from "@earendil-works/pi-ai";
 import { type AgentToolResult, type ExtensionAPI, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
+import { addUsage } from "../footer/cost.ts";
 import { untilInterrupt } from "./interrupt.ts";
 
 const DEFAULT_MAX_CONCURRENT = 3;
@@ -107,8 +109,14 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		waiting.shift()?.();
 	};
 
-	/** Runs one child to its end. Resolves with its final answer, or rejects with the reason and the stderr tail. */
-	const run = async (agent: Agent, task: string, sessionDir: string | undefined, signal: AbortSignal | undefined, onProgress?: (line: string) => void) => {
+	/** Runs one child to its end. `text` is its final answer, or on failure the reason and the stderr tail; `usage` sums the child's model calls. */
+	const run = async (
+		agent: Agent,
+		task: string,
+		sessionDir: string | undefined,
+		signal: AbortSignal | undefined,
+		onProgress?: (line: string) => void,
+	): Promise<{ text: string; failed: boolean; usage?: Usage }> => {
 		await acquire();
 		const id = `sub${next++}`;
 		try {
@@ -125,11 +133,12 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			let stderr = "";
 			let buffered = "";
 			let tools = 0;
+			let usage: Usage | undefined;
 			child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
 				const lines = (buffered + chunk).split("\n");
 				buffered = lines.pop() ?? "";
 				for (const line of lines) {
-					let event: { type?: string; toolName?: string; message?: { role?: string; stopReason?: string; errorMessage?: string; content?: unknown } };
+					let event: { type?: string; toolName?: string; message?: { role?: string; stopReason?: string; errorMessage?: string; content?: unknown; usage?: Usage } };
 					try {
 						event = JSON.parse(line);
 					} catch {
@@ -137,6 +146,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 					}
 					if (event.type === "tool_execution_start") onProgress?.(`${agent.name}: ${++tools} tool calls, now ${event.toolName ?? "?"}`);
 					if (event.type !== "message_end" || event.message?.role !== "assistant") continue;
+					usage = addUsage(usage, event.message.usage);
 					const parts = Array.isArray(event.message.content) ? (event.message.content as { type?: string; text?: string }[]) : [];
 					answer = parts.flatMap((part) => (part.type === "text" && part.text ? [part.text] : [])).join("\n");
 					stop = event.message.stopReason ?? "";
@@ -151,13 +161,12 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			child.on("close", (code, killedBy) => exited.resolve(code === 0 ? "" : killedBy ? `killed by ${killedBy}` : `exit ${code}`));
 			const exit = await exited.promise;
 			signal?.removeEventListener("abort", kill);
-			if (!exit && answer && stop !== "error" && stop !== "aborted") return answer;
+			if (!exit && answer && stop !== "error" && stop !== "aborted") return { text: answer, failed: false, usage };
 			const reason = [exit, stop === "error" || stop === "aborted" ? `model ${stop}` : "", !answer ? "no answer" : ""].filter(Boolean).join(", ");
-			throw new Error(
-				[`${agent.name} failed (${reason}).`, error, stderr.trim() && `stderr:\n${stderr.trim()}`, sessionDir && `transcript: ${sessionDir}`]
-					.filter(Boolean)
-					.join("\n"),
-			);
+			const text = [`${agent.name} failed (${reason}).`, error, stderr.trim() && `stderr:\n${stderr.trim()}`, sessionDir && `transcript: ${sessionDir}`]
+				.filter(Boolean)
+				.join("\n");
+			return { text, failed: true, usage };
 		} finally {
 			children.delete(id);
 			release();
@@ -173,7 +182,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		task: Type.String({ description: "The whole assignment: the question, the file paths and facts you already have, and what to return." }),
 		background: Type.Optional(Type.Boolean({ description: "Return at once; you are woken with the result." })),
 	});
-	const text = (value: string): AgentToolResult<undefined> => ({ content: [{ type: "text", text: value }], details: undefined });
+	const text = (value: string, usage?: Usage, isError?: boolean): AgentToolResult<undefined> => ({ content: [{ type: "text", text: value }], details: undefined, usage, isError });
 
 	pi.registerTool({
 		name: "subagent",
@@ -187,13 +196,13 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (!agent) throw new Error(`No agent "${input.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			const sessionDir = sessionFile ? join(ctx.sessionManager.getSessionDir(), "subagents", ctx.sessionManager.getSessionId()) : undefined;
-			const report = (result: Promise<string>) =>
+			const report = (result: ReturnType<typeof run>) =>
 				void result.then(
-					(answer) => wake(`Subagent ${agent.name} finished:\n${answer}`, false),
-					(error: Error) => wake(`Subagent ${error.message}`, true),
+					(done) => wake(done.failed ? `Subagent ${done.text}` : `Subagent ${agent.name} finished:\n${done.text}`, done.failed, done.usage),
+					(error: Error) => wake(`Subagent ${agent.name} failed: ${error.message}`, true, undefined),
 				);
-			const wake = (content: string, error: boolean) =>
-				pi.sendMessage({ customType: "subagent", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
+			const wake = (content: string, error: boolean, usage: Usage | undefined) =>
+				pi.sendMessage({ customType: "subagent", content, display: true, details: { error, usage } }, { triggerTurn: true, deliverAs: "steer" });
 			if (input.background) {
 				// A background child outlives the tool call, so the call's signal does not cancel it.
 				report(run(agent, input.task, sessionDir, undefined));
@@ -204,7 +213,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 					if (attached()) onUpdate?.({ content: [{ type: "text", text: line }], details: undefined });
 				}),
 			);
-			if ("value" in outcome) return text(outcome.value);
+			if ("value" in outcome) return text(outcome.value.text, outcome.value.usage, outcome.value.failed);
 			report(outcome.background);
 			return text(`The user interrupted; ${agent.name} moved to the background and you are woken with its result or its failure.`);
 		},
