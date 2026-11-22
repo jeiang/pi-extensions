@@ -403,7 +403,14 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			const route = grepRoute(input.command);
 			if (route && !input.background) {
 				const outcome = await ctx.executeTool("grep", { ...route, path: route.path ?? cwd }, { signal });
-				if (!outcome.isError) return { ...text(outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("")), content: outcome.result.content };
+				if (!outcome.isError) {
+					const found = outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+					mkdirSync(logDir, { recursive: true });
+					const log = join(logDir, `${process.pid}-grep${next++}.log`);
+					writeFileSync(log, found);
+					const shown = view(found, input.tail);
+					return { ...text(`${shown}\nlog: ${log}`), structuredContent: { status: "exited", exit_code: 0, log, output: shown } };
+				}
 			}
 			const job = await start(input.command, cwd);
 			if (input.background && !pattern && input.wait_seconds === undefined) {
