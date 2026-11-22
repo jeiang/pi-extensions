@@ -46,6 +46,64 @@ const params = Type.Object({
 	pr: Type.Optional(Type.String({ description: "pr_view: number, URL, or branch; default the current branch's PR." })),
 });
 
+const check = Type.Object({ name: Type.String(), status: Type.String(), conclusion: Type.Union([Type.String(), Type.Null()]), url: Type.Optional(Type.String()) });
+const outputSchema = Type.Object({
+	op: Type.String(),
+	pr: Type.Optional(
+		Type.Object({
+			number: Type.Number(),
+			title: Type.String(),
+			state: Type.String({ description: "OPEN, CLOSED, or MERGED" }),
+			url: Type.String(),
+			branch: Type.String(),
+			mergeable: Type.String(),
+			reviewDecision: Type.Union([Type.String(), Type.Null()]),
+			mergedAt: Type.Union([Type.String(), Type.Null()]),
+			checks: Type.Array(check),
+		}),
+	),
+	conclusion: Type.Optional(Type.String({ description: "run_watch: success, failure, none (no runs yet), or background (the user interrupted; you are woken later)." })),
+	runs: Type.Optional(
+		Type.Array(
+			Type.Object({ id: Type.Number(), workflow: Type.String(), status: Type.String(), conclusion: Type.Union([Type.String(), Type.Null()]), url: Type.String(), failed_jobs: Type.Array(Type.String()) }),
+		),
+	),
+	failed_log: Type.Optional(Type.String({ description: "The failed job's log tail." })),
+});
+type Output = Static<typeof outputSchema>;
+
+interface PrView {
+	number: number;
+	title: string;
+	state: string;
+	url: string;
+	headRefName: string;
+	mergeable: string;
+	reviewDecision: string | null;
+	mergedAt: string | null;
+	statusCheckRollup?: { name?: string; context?: string; status?: string; state?: string; conclusion?: string | null; detailsUrl?: string; targetUrl?: string }[];
+}
+
+/** CheckRuns and commit StatusContexts in one shape. */
+function checksOf(pr: PrView): Static<typeof check>[] {
+	return (pr.statusCheckRollup ?? []).map((c) => ({
+		name: c.name ?? c.context ?? "",
+		status: c.status ?? (c.state === "PENDING" || c.state === "EXPECTED" ? "IN_PROGRESS" : "COMPLETED"),
+		conclusion: c.conclusion ?? (c.state && c.state !== "PENDING" && c.state !== "EXPECTED" ? c.state : null),
+		...((c.detailsUrl ?? c.targetUrl) ? { url: c.detailsUrl ?? c.targetUrl } : {}),
+	}));
+}
+
+const runsOf = (runs: RunView[]): NonNullable<Output["runs"]> =>
+	runs.map((r) => ({
+		id: r.databaseId,
+		workflow: r.workflowName,
+		status: r.status,
+		conclusion: r.conclusion,
+		url: r.url,
+		failed_jobs: r.jobs.filter(failed).map((job) => job.name),
+	}));
+
 async function gh<T>(cwd: string, args: string[]): Promise<T> {
 	const { stdout } = await run("gh", args, { cwd, maxBuffer: 32 * 1024 * 1024 });
 	return JSON.parse(stdout) as T;
@@ -95,21 +153,26 @@ export default function (pi: ExtensionAPI) {
 		name: "github",
 		label: "GitHub",
 		description:
-			"Watch GitHub Actions runs until they finish, failing fast with the failed job's log tail (run_watch), or show a pull request's state and checks (pr_view). If the user interrupts run_watch, it keeps watching in the background and wakes you with the outcome. Use `gh` through shell for everything else.",
+			"Watch GitHub Actions runs until they finish, failing fast with the failed job's log tail (run_watch), or show a pull request's state and checks (pr_view). If the user interrupts run_watch, it keeps watching in the background and wakes you with the outcome. Use `gh` through shell for everything else. Scripts get { op, pr?: { state, mergeable, checks: [{ name, status, conclusion }] }, conclusion?, runs?, failed_log? }.",
 		promptSnippet: "Watch CI runs (fail fast, failed log tail) and view PR state",
 		parameters: params,
-		exposure: "model-only",
-		async execute(_id, input: Static<typeof params>, signal, onUpdate, ctx): Promise<AgentToolResult<Details>> {
+		outputSchema,
+		async execute(_id, input: Static<typeof params>, signal, onUpdate, ctx): Promise<AgentToolResult<Details> & { structuredContent: Output }> {
 			const cwd = sessionDir(ctx);
 			if (input.op === "pr_view") {
-				const pr = await gh<Record<string, unknown>>(cwd, [
+				const pr = await gh<PrView>(cwd, [
 					"pr",
 					"view",
 					...(input.pr ? [input.pr] : []),
 					"--json",
 					"number,title,state,url,headRefName,mergeable,reviewDecision,mergedAt,statusCheckRollup",
 				]);
-				return { content: [{ type: "text", text: JSON.stringify(pr, null, 2) }], details: { runs: [] } };
+				const { headRefName, statusCheckRollup: _rollup, ...rest } = pr;
+				return {
+					content: [{ type: "text", text: JSON.stringify(pr, null, 2) }],
+					details: { runs: [] },
+					structuredContent: { op: "pr_view", pr: { ...rest, branch: headRefName, checks: checksOf(pr) } },
+				};
 			}
 			let ids: string[];
 			if (input.run) ids = [input.run];
@@ -117,9 +180,9 @@ export default function (pi: ExtensionAPI) {
 				const sha = (await run("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim();
 				const listed = await gh<{ databaseId: number }[]>(cwd, ["run", "list", "--commit", sha, "--json", "databaseId"]);
 				ids = listed.map((r) => String(r.databaseId));
-				if (ids.length === 0) return { content: [{ type: "text", text: `No runs for ${sha} yet.` }], details: { runs: [] } };
+				if (ids.length === 0) return { content: [{ type: "text", text: `No runs for ${sha} yet.` }], details: { runs: [] }, structuredContent: { op: "run_watch", conclusion: "none", runs: [] } };
 			}
-			const watch = async (signal: AbortSignal, attached: () => boolean): Promise<AgentToolResult<Details>> => {
+			const watch = async (signal: AbortSignal, attached: () => boolean): Promise<AgentToolResult<Details> & { structuredContent: Output }> => {
 				let runs: RunView[] = [];
 				while (!signal.aborted) {
 					runs = await Promise.all(ids.map((id) => gh<RunView>(cwd, ["run", "view", id, "--json", RUN_FIELDS])));
@@ -130,11 +193,14 @@ export default function (pi: ExtensionAPI) {
 				}
 				let text = renderRuns(runs, undefined, false);
 				const failure = runs.find((r) => r.jobs.some(failed));
+				let failedLog: string | undefined;
 				if (failure) {
 					const log = await ghText(cwd, ["run", "view", String(failure.databaseId), "--log-failed"]).catch((error: Error) => error.message);
-					text += `\n\nFailed log tail (${failure.workflowName}):\n${log.trimEnd().split("\n").slice(-LOG_LINES).join("\n")}`;
+					failedLog = log.trimEnd().split("\n").slice(-LOG_LINES).join("\n");
+					text += `\n\nFailed log tail (${failure.workflowName}):\n${failedLog}`;
 				}
-				return { content: [{ type: "text", text }], details: { runs }, isError: Boolean(failure) };
+				const structuredContent: Output = { op: "run_watch", conclusion: failure ? "failure" : "success", runs: runsOf(runs), ...(failedLog ? { failed_log: failedLog } : {}) };
+				return { content: [{ type: "text", text }], details: { runs }, isError: Boolean(failure), structuredContent };
 			};
 			const outcome = await untilInterrupt(signal, (own, attached) => watch(AbortSignal.any([own, shutdown.signal]), attached));
 			if ("value" in outcome) return outcome.value;
@@ -147,7 +213,11 @@ export default function (pi: ExtensionAPI) {
 				},
 				(error: Error) => wake(`CI watch failed: ${error.message}`, true),
 			);
-			return { content: [{ type: "text", text: "The user interrupted; still watching CI in the background. You are woken with the outcome." }], details: { runs: [] } };
+			return {
+				content: [{ type: "text", text: "The user interrupted; still watching CI in the background. You are woken with the outcome." }],
+				details: { runs: [] },
+				structuredContent: { op: "run_watch", conclusion: "background" },
+			};
 		},
 		renderResult(result, options, theme) {
 			const runs = result.details?.runs ?? [];
