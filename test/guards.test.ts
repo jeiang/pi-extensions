@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { test } from "node:test";
-import { commandViolation, maskSecrets, restrictedFolder } from "../extensions/guards/index.ts";
+import { commandHabit, commandViolation, maskSecrets, restrictedFolder } from "../extensions/guards/index.ts";
 
 test("blocks permanent installs and history rewrites", () => {
 	for (const command of [
@@ -34,6 +34,13 @@ test("allows ordinary installs and git commands", () => {
 	]) {
 		assert.equal(commandViolation(command), undefined, command);
 	}
+});
+
+test("redirects piped check output without asking, and leaves other pipes alone", () => {
+	assert.ok(commandHabit("npm test 2>&1 | tail -30"));
+	assert.ok(commandHabit("cargo check 2>&1 | grep -E error"));
+	assert.equal(commandViolation("npm test 2>&1 | tail -30"), undefined);
+	assert.equal(commandHabit("git log --oneline | head -5"), undefined);
 });
 
 test("finds restricted folders for relative and home paths", () => {

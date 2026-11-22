@@ -30,8 +30,10 @@ export const COMMAND_RULES: Rule[] = [
 	{ pattern: /\bgit\s+rebase\b/, reason: HISTORY },
 	{ pattern: /\bgit\s+reset\b[^|;&]*\s(--hard|--soft|--keep|--merge|HEAD[~^])/, reason: HISTORY },
 	{ pattern: /\bgit\s+push\b[^|;&]*\s(-f\b|--force\b|--force-with-lease\b|\+\S)/, reason: HISTORY },
-	{ pattern: /2>&1\s*\|\s*(tail|head|grep)\b/, reason: PIPED },
 ];
+
+/** Habits with a better tool: blocked with the redirect at once, never put to the user. */
+export const HABIT_RULES: Rule[] = [{ pattern: /2>&1\s*\|\s*(tail|head|grep)\b/, reason: PIPED }];
 
 const RESTRICTED = ["~/.ssh", "~/.gnupg", "~/.config/sops", "/etc"];
 
@@ -48,6 +50,10 @@ const SECRETS: RegExp[] = [
 
 export function commandViolation(command: string): string | undefined {
 	return COMMAND_RULES.find((rule) => rule.pattern.test(command))?.reason;
+}
+
+export function commandHabit(command: string): string | undefined {
+	return HABIT_RULES.find((rule) => rule.pattern.test(command))?.reason;
 }
 
 const expand = (path: string) => (path.startsWith("~/") ? `${homedir()}${path.slice(1)}` : path);
@@ -84,6 +90,8 @@ export default function (pi: ExtensionAPI) {
 		const input = event.input as Record<string, unknown>;
 		if (COMMAND_TOOLS[event.toolName] && typeof input.command === "string") {
 			const command = input.command;
+			const habit = commandHabit(command);
+			if (habit) return { block: true, reason: habit };
 			const violation = commandViolation(command);
 			if (violation && !(await allow(ctx, "Allow blocked command?", `${violation}\n\n${command}`))) {
 				return { block: true, reason: `${violation} If the user asked for it, ask them to run it.` };
