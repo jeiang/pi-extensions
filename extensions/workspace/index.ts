@@ -124,10 +124,12 @@ export default function (pi: ExtensionAPI) {
 	override(hashline.replace);
 	override(hashline.write);
 	override(
-		substituteTool(store, (absolute) => {
+		substituteTool(store, (absolute, input) => {
 			if (needsWorktree() && inMainCheckout(absolute)) return NEEDS_WORKTREE;
+			// guards asks the user about restricted folders named in paths; one reached only by expanding a directory was never asked about.
 			const folder = restrictedFolder(absolute, cwd());
-			return folder ? `${folder} is restricted. Ask the user before touching it.` : undefined;
+			if (!folder || input.paths?.some((path) => restrictedFolder(path, cwd()) === folder)) return undefined;
+			return `${folder} is restricted; name it in paths so the user is asked.`;
 		}),
 	);
 	override(structuredGrep);
