@@ -29,7 +29,6 @@ import {
 	detectRepo,
 	enterWorktree,
 	fastForwardMain,
-	GIT_MUTATION,
 	ownWorktrees,
 	pruneWorktrees,
 	type Repo,
@@ -46,6 +45,8 @@ const NEEDS_WORKTREE =
 export default function (pi: ExtensionAPI) {
 	let sessionCwd = process.cwd();
 	let repo: Repo | undefined;
+	// Only a repository with commits at session start requires a worktree; one made during the session does not.
+	let guarded = false;
 	let worktree: Worktree | undefined;
 	let request = "";
 
@@ -63,7 +64,7 @@ export default function (pi: ExtensionAPI) {
 			},
 		});
 	const remap = (path: unknown) => (typeof path === "string" && repo && worktree ? remapPath(path, repo.root, worktree.path) : path);
-	const needsWorktree = () => Boolean(repo && !repo.linked && repo.hasCommits && !worktree);
+	const needsWorktree = () => guarded && !worktree;
 	const inMainCheckout = (path: string) => Boolean(repo && checkoutRelative(resolve(sessionCwd, path.replace(/^@/, "")), repo.root) !== undefined);
 
 	const devshells = new Map<string, { stamp: string; pending: Promise<Devshell | undefined> }>();
@@ -181,6 +182,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCwd = ctx.cwd;
 		repo = await detectRepo(ctx.cwd);
+		guarded = Boolean(repo && !repo.linked && repo.hasCommits);
 		const saved = ctx.sessionManager
 			.getBranch()
 			.filter((entry) => entry.type === "custom" && entry.customType === ENTRY)
@@ -224,12 +226,6 @@ export default function (pi: ExtensionAPI) {
 			if (paths.some(inMainCheckout)) return { block: true, reason: NEEDS_WORKTREE };
 			return;
 		}
-		if (event.toolName !== "bash" && event.toolName !== "shell") return;
-		const command = input.command;
-		if (typeof command !== "string") return;
-		if (typeof input.cwd === "string" && !inMainCheckout(cwd(input.cwd))) return;
-		if (!needsWorktree() || !GIT_MUTATION.test(command) || /\bcd\s|\bgit\s+-C\s/.test(command)) return;
-		return { block: true, reason: NEEDS_WORKTREE };
 	});
 
 	pi.on("tool_result", async (event) => {
@@ -301,11 +297,12 @@ export default function (pi: ExtensionAPI) {
 		name: "worktree",
 		label: "Worktree",
 		description:
-			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, the current one included, and those branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes and git commands in the main checkout are blocked until create or enter.",
+			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, the current one included, and those branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes in the main checkout are blocked until create or enter.",
 		promptSnippet: "Create, enter, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
 		parameters: worktreeParams,
 		exposure: "model-only",
 		async execute(_id, input: Static<typeof worktreeParams>, _signal, _onUpdate, ctx) {
+			if (!worktree && !repo?.hasCommits) repo = await detectRepo(sessionCwd);
 			if (input.repo) {
 				const other = await detectRepo(resolve(cwd(), input.repo.replace(/^@/, "")));
 				if (!other) throw new Error(`${input.repo} is not in a git repository.`);
@@ -335,7 +332,7 @@ export default function (pi: ExtensionAPI) {
 					const gone = worktree;
 					switchTo(ctx, undefined);
 					await fastForwardMain(root, await baseRef(root));
-					return text(`Removed ${gone.path}; branch ${gone.branch} is kept. Create or enter a worktree before the next write.`);
+					return text(`Removed ${gone.path}; branch ${gone.branch} is kept.${guarded ? " Create or enter a worktree before the next write." : ""}`);
 				}
 				case "list": {
 					const rows = (await ownWorktrees(root)).map((w) => `${w.path === worktree?.path ? "* " : "  "}${w.path} ${w.branch ?? "(detached)"}`);
@@ -362,7 +359,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("worktree", {
 		description: "Create the session's git worktree: /worktree <name>",
 		handler: async (args, ctx) => {
-			if (!needsWorktree() || !repo) return ctx.ui.notify(worktree ? `Already in ${worktree.path}` : "No worktree needed here", "info");
+			if (worktree) return ctx.ui.notify(`Already in ${worktree.path}`, "info");
+			if (!repo?.hasCommits) repo = await detectRepo(sessionCwd);
+			if (!repo || repo.linked || !repo.hasCommits) return ctx.ui.notify("No worktree needed here", "info");
 			switchTo(ctx, await createWorktree(repo.root, args.trim() || request || "work"));
 		},
 	});
