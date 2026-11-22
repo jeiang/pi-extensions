@@ -16,4 +16,8 @@ links all three into `~/.pi/agent`.
 - Pin `@earendil-works/pi-coding-agent` to the pi version cornn-flaek runs.
   Runtime dependencies go in `dependencies`; everything pi supplies stays in
   `devDependencies`.
+- On a pi bump, diff pi's `dist/extensions/codemode` against
+  `extensions/codemode`, which captures the built-in tool, replaces its
+  guideline, and inserts helpers after the `// @options` line;
+  `test/codemode.test.ts` fails if the capture breaks.
 - Conventional Commits.
