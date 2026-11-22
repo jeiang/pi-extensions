@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -34,7 +34,14 @@ interface Job {
 	done: Promise<void>;
 }
 
+export const cwdParam = Type.Optional(
+	Type.String({
+		description: "Directory to run in, such as a worktree of another repository; an absolute path, or relative to the session directory. Loads that directory's devshell.",
+	}),
+);
+
 const params = Type.Object({
+	cwd: cwdParam,
 	command: Type.Optional(Type.String({ description: "Shell command (bash). Runs inside the repository's devshell." })),
 	timeout: Type.Optional(
 		Type.Number({ description: `Seconds before a foreground command moves to the background (default ${DEFAULT_TIMEOUT_S}). It is not killed.` }),
@@ -138,7 +145,8 @@ export function grepRoute(command: string): Record<string, unknown> | undefined 
 }
 
 export interface ShellOptions {
-	cwd: () => string;
+	/** The session directory, or `dir` resolved against it. */
+	cwd: (dir?: string) => string;
 	env: (cwd: string) => Promise<NodeJS.ProcessEnv>;
 	/** Why the devshell for `cwd` failed to load, if it did. */
 	devshellError: (cwd: string) => string | undefined;
@@ -149,6 +157,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 	const ops = createLocalBashOperations();
 	const logDir = join(tmpdir(), "pi-shell");
 	let next = 1;
+	const dirOf = (input?: string) => {
+		const dir = options.cwd(input);
+		if (!existsSync(dir)) throw new Error(`No directory ${dir}`);
+		return dir;
+	};
 	/** The exit result of a foreground command; the job is done and forgotten. */
 	const finished = (job: Job) => {
 		jobs.delete(job.id);
@@ -289,8 +302,8 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 	});
 
 	/** The codemode `bash` tool: pi's result shape, run as a job so that an interrupt leaves the command running. */
-	const bash = async (input: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<undefined> | undefined) => {
-		const job = await start(input.command, options.cwd());
+	const bash = async (input: { command: string; timeout?: number; cwd?: string }, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<undefined> | undefined) => {
+		const job = await start(input.command, dirOf(input.cwd));
 		const unfollow = follow(job, onUpdate);
 		const why = await waitFor(job, undefined, input.timeout, signal);
 		unfollow();
@@ -344,7 +357,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 				return progress(job, `Wait ended: ${why}.`);
 			}
 			if (!input.command) throw new Error("command is required");
-			const cwd = options.cwd();
+			const cwd = dirOf(input.cwd);
 			const route = grepRoute(input.command);
 			if (route && !input.background) {
 				const outcome = await ctx.executeTool("grep", { ...route, path: route.path ?? cwd }, { signal });

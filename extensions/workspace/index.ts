@@ -17,7 +17,7 @@ import { setSessionDir } from "./cwd.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerInterrupt } from "./interrupt.ts";
-import { registerShell } from "./shell.ts";
+import { cwdParam, registerShell } from "./shell.ts";
 import { registerSubagent } from "./subagent.ts";
 import {
 	baseRef,
@@ -47,7 +47,10 @@ export default function (pi: ExtensionAPI) {
 	let worktree: Worktree | undefined;
 	let request = "";
 
-	const cwd = () => worktree?.path ?? sessionCwd;
+	const cwd = (dir?: string) => {
+		const base = worktree?.path ?? sessionCwd;
+		return dir ? resolve(base, String(remap(dir))) : base;
+	};
 	// Built-in tools resolve relative paths against ctx.cwd, which pi cannot change mid-session.
 	const inCwd = <T extends ExtensionContext>(ctx: T, dir: string): T =>
 		new Proxy(ctx, {
@@ -125,9 +128,10 @@ export default function (pi: ExtensionAPI) {
 		...bashTemplate,
 		description: `${bashTemplate.description} If the user interrupts, the call rejects with the job id, which ends the script unless it catches the error, and the command keeps running as a shell job.`,
 		exposure: "codemode",
+		parameters: Type.Object({ ...bashTemplate.parameters.properties, cwd: cwdParam }),
 		execute: (_id, params, signal, onUpdate) => shell.bash(params, signal, onUpdate),
 	});
-	registerSubagent(pi, { cwd, env });
+	registerSubagent(pi, { cwd: () => cwd(), env });
 	registerInterrupt(pi);
 
 	pi.on("user_bash", async (event) => {
@@ -185,6 +189,7 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName !== "bash" && event.toolName !== "shell") return;
 		const command = input.command;
 		if (typeof command !== "string") return;
+		if (typeof input.cwd === "string" && !inMainCheckout(cwd(input.cwd))) return;
 		if (!needsWorktree() || !GIT_MUTATION.test(command) || /\bcd\s|\bgit\s+-C\s/.test(command)) return;
 		return { block: true, reason: NEEDS_WORKTREE };
 	});
@@ -204,20 +209,74 @@ export default function (pi: ExtensionAPI) {
 			Type.Literal("prune"),
 			Type.Literal("carry"),
 		]),
-		name: Type.Optional(Type.String({ description: "create: short kebab-case name for the new branch and directory. enter: an existing local or origin branch." })),
+		name: Type.Optional(
+			Type.String({
+				description: "create: short kebab-case name for the new branch and directory. enter: an existing local or origin branch. remove with repo: the branch whose worktree to delete.",
+			}),
+		),
 		paths: Type.Optional(Type.Array(Type.String(), { description: "carry: paths changed in the main checkout to move into this worktree." })),
 		force: Type.Optional(Type.Boolean({ description: "remove: discard uncommitted changes." })),
+		repo: Type.Optional(
+			Type.String({
+				description:
+					"Another repository's main checkout (absolute path) to run create, enter, remove, list, or prune in. The session stays where it is; run commands in the new worktree through the cwd parameter of shell or bash.",
+			}),
+		),
 	});
 	const text = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: undefined });
+	/** Worktree actions in a repository other than the session's; the session's directory stays unchanged. */
+	const inOtherRepo = async (root: string, input: Static<typeof worktreeParams>) => {
+		const hint = "Run commands there with the cwd parameter of shell or bash and use absolute file paths; this session's directory is unchanged.";
+		switch (input.action) {
+			case "create":
+			case "enter": {
+				if (!input.name) throw new Error(`${input.action} needs a name.`);
+				const made = input.action === "create" ? await createWorktree(root, input.name) : await enterWorktree(root, input.name);
+				if (input.action === "create") await fastForwardMain(root, made.base);
+				return text(`Worktree ${made.path} on branch ${made.branch} (from ${made.base}). ${hint}`);
+			}
+			case "remove": {
+				if (!input.name) throw new Error("remove with repo needs the branch name of the worktree.");
+				const target = (await ownWorktrees(root)).find((w) => w.branch === input.name);
+				if (!target) throw new Error(`No worktree of branch ${input.name} under ${root}/.worktrees/.`);
+				const refusal = await removeWorktree(root, target.path, input.force ?? false);
+				if (refusal) throw new Error(refusal);
+				await fastForwardMain(root, await baseRef(root));
+				return text(`Removed ${target.path}; branch ${input.name} is kept.`);
+			}
+			case "list": {
+				const rows = (await ownWorktrees(root)).map((w) => `  ${w.path} ${w.branch ?? "(detached)"}`);
+				return text(rows.join("\n") || `No worktrees under ${root}/.worktrees/.`);
+			}
+			case "prune": {
+				const base = await baseRef(root);
+				const removed = await pruneWorktrees(root, base);
+				await fastForwardMain(root, base);
+				return text(removed.length ? `Removed:\n${removed.join("\n")}` : "Nothing merged to prune.");
+			}
+			case "carry":
+				throw new Error("carry works only in this session's repository.");
+		}
+		throw new Error(`Unknown action ${String(input.action)}.`);
+	};
 	pi.registerTool({
 		name: "worktree",
 		label: "Worktree",
 		description:
-			"Control this session's git worktree under .worktrees/. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, the current one included, and those branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes and git commands in the main checkout are blocked until create or enter.",
+			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, the current one included, and those branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes and git commands in the main checkout are blocked until create or enter.",
 		promptSnippet: "Create, enter, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
 		parameters: worktreeParams,
 		exposure: "model-only",
 		async execute(_id, input: Static<typeof worktreeParams>, _signal, _onUpdate, ctx) {
+			if (input.repo) {
+				const other = await detectRepo(resolve(cwd(), input.repo.replace(/^@/, "")));
+				if (!other) throw new Error(`${input.repo} is not in a git repository.`);
+				if (other.root !== repo?.root) {
+					if (other.linked) throw new Error(`${other.root} is a linked worktree; pass its main checkout.`);
+					if (!other.hasCommits) throw new Error(`${other.root} has no commits; work in it directly.`);
+					return inOtherRepo(other.root, input);
+				}
+			}
 			if (!repo) return text("Not in a git repository; nothing to do.");
 			if (repo.linked) return text(`The session started in linked worktree ${repo.root}; work in it directly.`);
 			if (!repo.hasCommits) return text("The repository has no commits; work in it directly.");
