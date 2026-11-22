@@ -9,10 +9,12 @@ interface Rule {
 }
 
 const COMMAND_TOOLS: Record<string, true> = { bash: true, shell: true };
-const PATH_TOOLS: Record<string, true> = { read: true, write: true, edit: true, grep: true, find: true, ls: true };
+const PATH_TOOLS: Record<string, true> = { read: true, write: true, edit: true, replace: true, substitute: true, grep: true, find: true, ls: true };
 
 const INSTALL = "Permanent installs are not allowed. Use `nix shell nixpkgs#<pkg> -c <cmd>` or `nix run`, or add the tool to the repository's devshell.";
 const HISTORY = "Rewriting git history needs the user's explicit request.";
+const PIPED =
+	"Piping output into tail, head, or grep keeps only part of it, and the log then holds only that part. Drop the pipe: pass tail: N for the end, then read the log named in the result (offset/limit, negative offset for the end) or grep it.";
 
 export const COMMAND_RULES: Rule[] = [
 	{ pattern: /\b(brew|port)\s+install\b/, reason: INSTALL },
@@ -28,6 +30,7 @@ export const COMMAND_RULES: Rule[] = [
 	{ pattern: /\bgit\s+rebase\b/, reason: HISTORY },
 	{ pattern: /\bgit\s+reset\b[^|;&]*\s(--hard|--soft|--keep|--merge|HEAD[~^])/, reason: HISTORY },
 	{ pattern: /\bgit\s+push\b[^|;&]*\s(-f\b|--force\b|--force-with-lease\b|\+\S)/, reason: HISTORY },
+	{ pattern: /2>&1\s*\|\s*(tail|head|grep)\b/, reason: PIPED },
 ];
 
 const RESTRICTED = ["~/.ssh", "~/.gnupg", "~/.config/sops", "/etc"];
@@ -91,10 +94,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			return;
 		}
-		if (PATH_TOOLS[event.toolName] && typeof input.path === "string") {
-			const folder = restrictedFolder(input.path, sessionDir(ctx));
-			if (folder && !(await allow(ctx, `Allow ${event.toolName} in ${folder}?`, input.path))) {
-				return { block: true, reason: `${folder} is restricted. Ask the user before touching it.` };
+		if (PATH_TOOLS[event.toolName]) {
+			const paths = [...(typeof input.path === "string" ? [input.path] : []), ...(Array.isArray(input.paths) ? input.paths.map(String) : [])];
+			for (const path of paths) {
+				const folder = restrictedFolder(path, sessionDir(ctx));
+				if (folder && !(await allow(ctx, `Allow ${event.toolName} in ${folder}?`, path))) {
+					return { block: true, reason: `${folder} is restricted. Ask the user before touching it.` };
+				}
 			}
 		}
 	});
