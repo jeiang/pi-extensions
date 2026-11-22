@@ -28,7 +28,7 @@ interface Target {
 	thinkingLevel: ModelThinkingLevel;
 }
 
-const LEVELS: Record<string, true> = { off: true, minimal: true, low: true, medium: true, high: true, xhigh: true, max: true };
+export const LEVELS: Record<string, true> = { off: true, minimal: true, low: true, medium: true, high: true, xhigh: true, max: true };
 // Errors pi does not retry because waiting will not help: subscription and account limits.
 const USAGE_LIMIT = /usage limit|quota|billing|out of budget|available balance|credit balance/i;
 const OVERFLOW = /context|too long|too many tokens|maximum.*tokens/i;
