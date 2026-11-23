@@ -157,6 +157,7 @@ async function mergedInto(root: string, base: string, mainline: Set<string>, tip
 	if (mainline.has(tip)) return false;
 	if ((await tryGit(root, "merge-base", "--is-ancestor", tip, base)) !== undefined) return true;
 	// A squash or rebase merge leaves the tip off base; its changes are in base when a merge adds nothing.
+	// Later commits that change no content pass too, so prune reports each removed tip.
 	const merge = await tryGit(root, "merge-tree", "--write-tree", base, tip);
 	return merge !== undefined && merge.split("\n")[0] === (await git(root, "rev-parse", `${base}^{tree}`));
 }
@@ -173,7 +174,7 @@ export async function pruneWorktrees(root: string, base: string): Promise<string
 		if ((await tryGit(w.path, "status", "--porcelain")) !== "") continue;
 		await git(root, "worktree", "remove", w.path);
 		await tryGit(root, "branch", "-D", w.branch);
-		removed.push(`${w.path} (${w.branch})`);
+		removed.push(`${w.path} (${w.branch} at ${tip.slice(0, 12)})`);
 	}
 	await tryGit(root, "worktree", "prune");
 	return removed;

@@ -189,8 +189,10 @@ test("prune removes merged and squash-merged worktrees only, never unused, unmer
 	}
 	commit(extended.path, "e2");
 	commit(dir, "later");
+	const tip = (branch: string) => git(dir, "rev-parse", "--short=12", branch).trim();
+	const tips = { merged: tip("merged"), squashed: tip("squashed") };
 	const removed = await pruneWorktrees(dir, "main");
-	assert.deepEqual(removed.sort(), [`${merged.path} (merged)`, `${squashed.path} (squashed)`]);
+	assert.deepEqual(removed.sort(), [`${merged.path} (merged at ${tips.merged})`, `${squashed.path} (squashed at ${tips.squashed})`]);
 	for (const kept of [dirty.path, unmerged.path, unused.path, extended.path, nested]) assert.equal(existsSync(kept), true);
 	assert.equal(git(dir, "branch", "--list", "merged", "squashed"), "");
 });
