@@ -1,9 +1,7 @@
 import {
 	type BashOperations,
 	createBashToolDefinition,
-	createFindToolDefinition,
 	createLocalBashOperations,
-	createLsToolDefinition,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ToolDefinition,
@@ -18,6 +16,7 @@ import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devsh
 import { structuredGrep } from "./grep.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerInterrupt } from "./interrupt.ts";
+import { readTextTool, structuredFind, structuredLs } from "./listing.ts";
 import { cwdParam, registerShell } from "./shell.ts";
 import { registerSubagent } from "./subagent.ts";
 import { substituteTool } from "./substitute.ts";
@@ -134,8 +133,9 @@ export default function (pi: ExtensionAPI) {
 		}),
 	);
 	override(structuredGrep);
-	override((dir) => createFindToolDefinition(dir), { exposure: "codemode" });
-	override((dir) => createLsToolDefinition(dir), { exposure: "codemode" });
+	override(structuredFind, { exposure: "codemode" });
+	override(structuredLs, { exposure: "codemode" });
+	override(readTextTool, { exposure: "codemode" });
 
 	const shell = registerShell(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
 	const bashTemplate = createBashToolDefinition(sessionCwd);
