@@ -9,7 +9,7 @@ interface Rule {
 }
 
 const COMMAND_TOOLS: Record<string, true> = { bash: true, shell: true };
-const PATH_TOOLS: Record<string, true> = { read: true, write: true, edit: true, replace: true, substitute: true, grep: true, find: true, ls: true };
+const PATH_TOOLS: Record<string, true> = { read: true, read_text: true, write: true, edit: true, replace: true, substitute: true, grep: true, find: true, ls: true };
 
 const INSTALL = "Permanent installs are not allowed. Use `nix shell nixpkgs#<pkg> -c <cmd>` or `nix run`, or add the tool to the repository's devshell.";
 const HISTORY = "Rewriting git history needs the user's explicit request.";
