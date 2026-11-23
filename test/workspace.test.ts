@@ -158,7 +158,7 @@ test("remove refuses a worktree with uncommitted changes and keeps the branch", 
 	execFileSync("git", ["rev-parse", "--verify", "refs/heads/rm"], { cwd: dir });
 });
 
-test("prune removes merged and squash-merged worktrees only, never unused, unmerged, extended, dirty, or nested ones", async () => {
+test("prune removes merged and squash-merged worktrees only, never unused, unmerged, extended, trimmed, dirty, or nested ones", async () => {
 	const dir = repo();
 	const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 	const commit = (cwd: string, file: string) => {
@@ -172,6 +172,7 @@ test("prune removes merged and squash-merged worktrees only, never unused, unmer
 	const unused = await createWorktree(dir, "unused");
 	const squashed = await createWorktree(dir, "squashed");
 	const extended = await createWorktree(dir, "extended");
+	const trimmed = await createWorktree(dir, "trimmed");
 	commit(merged.path, "m");
 	commit(dirty.path, "d");
 	commit(unmerged.path, "u");
@@ -183,11 +184,16 @@ test("prune removes merged and squash-merged worktrees only, never unused, unmer
 	commit(squashed.path, "s1");
 	commit(squashed.path, "s2");
 	commit(extended.path, "e1");
-	for (const branch of ["squashed", "extended"]) {
+	commit(trimmed.path, "t1");
+	commit(trimmed.path, "t2");
+	for (const branch of ["squashed", "extended", "trimmed"]) {
 		git(dir, "merge", "-q", "--squash", branch);
 		git(dir, "commit", "-qm", `squash ${branch}`);
 	}
 	commit(extended.path, "e2");
+	// Undoing part of the branch after its squash merge leaves a merge into main unchanged.
+	git(trimmed.path, "rm", "-q", "t2");
+	git(trimmed.path, "commit", "-qm", "drop t2");
 	// A later edit on main to a squashed file makes a merge of the branch into main's tip conflict.
 	writeFileSync(join(dir, "s1"), "edited\n");
 	git(dir, "commit", "-qam", "edit s1");
@@ -195,7 +201,7 @@ test("prune removes merged and squash-merged worktrees only, never unused, unmer
 	const tips = { merged: tip("merged"), squashed: tip("squashed") };
 	const removed = await pruneWorktrees(dir, "main");
 	assert.deepEqual(removed.sort(), [`${merged.path} (merged at ${tips.merged})`, `${squashed.path} (squashed at ${tips.squashed})`]);
-	for (const kept of [dirty.path, unmerged.path, unused.path, extended.path, nested]) assert.equal(existsSync(kept), true);
+	for (const kept of [dirty.path, unmerged.path, unused.path, extended.path, trimmed.path, nested]) assert.equal(existsSync(kept), true);
 	assert.equal(git(dir, "branch", "--list", "merged", "squashed"), "");
 });
 
