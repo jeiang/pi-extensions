@@ -4,6 +4,7 @@ import { join, relative, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { askAdvisor } from "../advisor/review.ts";
 
 const ENTRY = "plan";
 const CONTEXT = "plan-mode-context";
@@ -76,6 +77,14 @@ function executionPrompt(plan: string, file: string): string {
 ${plan}`;
 }
 
+function advisorRequest(plan: string): string {
+	return `The agent proposes the plan below for the user's approval; nothing has changed yet. Review the plan, not the run: flag a step that would fail or break something, a requirement or caller the transcript shows it misses, or an assumption it relies on that a cheap check would settle. Use the same labels, or answer LGTM.
+
+<plan>
+${plan}
+</plan>`;
+}
+
 /** The plan file for `slug`, or the newest one in `dir`. */
 function findPlan(dir: string, slug: string): string | undefined {
 	const named = join(dir, `${slug.replace(/\.md$/, "")}.md`);
@@ -91,6 +100,10 @@ export default function (pi: ExtensionAPI) {
 	let state: PlanState = { enabled: false };
 	let reviewPending = false;
 	let reviewing = false;
+	/** Whether the advisor already sent this input's plan back; a second proposal goes straight to the user. */
+	let advised = false;
+	/** The advisor's nits on the proposed plan, shown on the review card. */
+	let notes = "";
 
 	const save = (next: PlanState, ctx: ExtensionContext) => {
 		state = next;
@@ -138,7 +151,8 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("No plan to review. Start one with /plan.", "warning");
 			return;
 		}
-		pi.sendMessage({ customType: PROPOSAL, content: readFileSync(file, "utf8"), display: true });
+		const card = notes ? `${readFileSync(file, "utf8")}\n\n---\n\n**Advisor nits**\n\n${notes}` : readFileSync(file, "utf8");
+		pi.sendMessage({ customType: PROPOSAL, content: card, display: true });
 		for (;;) {
 			const choice = await ctx.ui.select(`Plan: ${file}`, [
 				"Approve and execute here",
@@ -195,14 +209,24 @@ export default function (pi: ExtensionAPI) {
 			title: Type.String({ description: "The plan's slug: the <slug> of <slug>.md in the plan directory." }),
 		}),
 		defaultActive: false,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
+		async execute(_id, params, signal, onUpdate, ctx) {
 			if (!state.enabled) throw new Error("Plan mode is off.");
 			const dir = planDir(ctx);
 			const file = findPlan(dir, params.title);
 			if (!file) throw new Error(`No plan in ${dir}. Write it to ${join(dir, `${params.title}.md`)} first.`);
+			const pending = advised ? undefined : askAdvisor(ctx, advisorRequest(readFileSync(file, "utf8")), signal);
+			if (pending) onUpdate?.({ content: [{ type: "text", text: "Advisor reviewing the plan…" }], details: { file } });
+			const advice = await pending;
+			if (advice?.serious) {
+				advised = true;
+				const text = `Advisor:\n${advice.serious}\n\nWeigh these points: fix the plan file for the ones the evidence supports, reject the others in one line each, then call ${PROPOSE} again.`;
+				return { content: [{ type: "text", text }], details: { file }, usage: advice.usage };
+			}
+			notes = advice?.nits ?? "";
 			save({ ...state, file }, ctx);
 			reviewPending = true;
-			return { content: [{ type: "text", text: `Plan ready for review: ${file}` }], details: { file }, terminate: true };
+			const verdict = advice ? (notes ? " The advisor left nits for the user." : " The advisor found no problems.") : "";
+			return { content: [{ type: "text", text: `Plan ready for review: ${file}.${verdict}` }], details: { file }, usage: advice?.usage, terminate: true };
 		},
 	});
 
@@ -235,6 +259,10 @@ export default function (pi: ExtensionAPI) {
 				reviewing = false;
 			}
 		},
+	});
+
+	pi.on("input", () => {
+		advised = false;
 	});
 
 	pi.on("tool_call", (event, ctx) => {

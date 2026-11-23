@@ -6,6 +6,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { LEVELS, parseTarget } from "../chains/index.ts";
 import { addUsage } from "../footer/cost.ts";
+import { setReviewer } from "./review.ts";
 
 export interface AdvisorConfig {
 	/** `provider/model:level` targets tried in order until one answers. */
@@ -122,7 +123,7 @@ export function createAdvisor(config: AdvisorConfig) {
 		let seen: { prompt: string; count: number; last?: number } | undefined;
 		let advisedThisInput = false;
 		let acted = false;
-		// The user reviews a proposed plan; the advisor would only delay that review.
+		// propose has the plan reviewed; reviewing the run again would only delay the user's review.
 		let proposed = false;
 
 		const setToolActive = () => {
@@ -142,6 +143,12 @@ export function createAdvisor(config: AdvisorConfig) {
 			enabled = state?.enabled ?? true;
 			targets = (state?.models ?? config.models).map(parseTarget);
 			setToolActive();
+			setReviewer(ctx, (ctx, request, signal) => {
+				if (!enabled) return undefined;
+				return ask(ctx, request, signal).then(({ answer, usage }) =>
+					answer && !LGTM.test(answer) ? { ...parseAdvice(answer), usage } : { serious: "", nits: "", usage },
+				);
+			});
 		};
 		pi.on("session_start", restore);
 		pi.on("session_tree", restore);
