@@ -2,6 +2,8 @@ import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export interface Review {
+	/** False when every advisor model failed or timed out; the other fields are then empty. */
+	answered: boolean;
 	/** Blockers and concerns, empty when there are none. */
 	serious: string;
 	nits: string;

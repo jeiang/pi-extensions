@@ -146,7 +146,7 @@ export function createAdvisor(config: AdvisorConfig) {
 			setReviewer(ctx, (ctx, request, signal) => {
 				if (!enabled) return undefined;
 				return ask(ctx, request, signal).then(({ answer, usage }) =>
-					answer && !LGTM.test(answer) ? { ...parseAdvice(answer), usage } : { serious: "", nits: "", usage },
+					answer === undefined ? { answered: false, serious: "", nits: "", usage } : LGTM.test(answer) ? { answered: true, serious: "", nits: "", usage } : { answered: true, ...parseAdvice(answer), usage },
 				);
 			});
 		};

@@ -4,7 +4,7 @@ import { join, relative, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { askAdvisor } from "../advisor/review.ts";
+import { askAdvisor, type Review } from "../advisor/review.ts";
 
 const ENTRY = "plan";
 const CONTEXT = "plan-mode-context";
@@ -153,7 +153,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("No plan to review. Start one with /plan.", "warning");
 			return;
 		}
-		const card = notes ? `${readFileSync(file, "utf8")}\n\n---\n\n**Advisor nits**\n\n${notes}` : readFileSync(file, "utf8");
+		const card = notes ? `${readFileSync(file, "utf8")}\n\n---\n\n**Advisor**\n\n${notes}` : readFileSync(file, "utf8");
 		pi.sendMessage({ customType: PROPOSAL, content: card, display: true });
 		for (;;) {
 			const choice = await ctx.ui.select(`Plan: ${file}`, [
@@ -218,16 +218,16 @@ export default function (pi: ExtensionAPI) {
 			if (!file) throw new Error(`No plan in ${dir}. Write it to ${join(dir, `${params.title}.md`)} first.`);
 			const pending = advised ? undefined : askAdvisor(ctx, advisorRequest(readFileSync(file, "utf8")), signal);
 			if (pending) onUpdate?.({ content: [{ type: "text", text: "Advisor reviewing the plan…" }], details: { file } });
-			const advice = await pending;
+			const advice = await pending?.catch((): Review => ({ answered: false, serious: "", nits: "" }));
 			if (advice?.serious) {
 				advised = true;
 				const text = `Advisor:\n${advice.serious}\n\nWeigh these points: fix the plan file for the ones the evidence supports, reject the others in one line each, then call ${PROPOSE} again.`;
 				return { content: [{ type: "text", text }], details: { file }, usage: advice.usage };
 			}
-			notes = advice?.nits ?? "";
+			notes = advice && !advice.answered ? "The advisor did not answer; this plan is unreviewed." : (advice?.nits ?? "");
 			save({ ...state, file }, ctx);
 			reviewPending = true;
-			const verdict = advice ? (notes ? " The advisor left nits for the user." : " The advisor found no problems.") : "";
+			const verdict = !advice ? "" : !advice.answered ? " The advisor did not answer." : notes ? " The advisor left nits for the user." : " The advisor found no problems.";
 			return { content: [{ type: "text", text: `Plan ready for review: ${file}.${verdict}` }], details: { file }, usage: advice?.usage, terminate: true };
 		},
 	});
