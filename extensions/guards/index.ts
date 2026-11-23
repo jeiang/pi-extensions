@@ -34,8 +34,13 @@ export const COMMAND_RULES: Rule[] = [
 	{ pattern: /\bgit\s+push\b[^|;&]*\s(-f\b|--force\b|--force-with-lease\b|\+\S)/, reason: HISTORY },
 ];
 
+const SWITCH =
+	"Switching branches moves the checkout the session works in. Use the worktree tool: enter for an existing branch, create for a new one. To read another revision use git show, diff, or log <rev>; to build or test one, git worktree add --detach <dir> <rev> and work there.";
+
 /** Habits with a better tool: blocked with the redirect at once, never put to the user. */
 export const HABIT_RULES: Rule[] = [{ pattern: /2>&1\s*\|\s*(tail|head|grep)\b/, reason: PIPED }];
+/** Habits that matter only on this machine, not in a command run over ssh. A `--` pathspec restores files, which is fine. */
+const LOCAL_HABIT_RULES: Rule[] = [{ pattern: /\bgit\s+(-C\s+\S+\s+)?(switch\b|checkout\b(?![^|;&\n]*\s--(\s|$)))/, reason: SWITCH }];
 
 const RESTRICTED = ["~/.ssh", "~/.gnupg", "~/.config/sops", "/etc"];
 
@@ -54,8 +59,8 @@ export function commandViolation(command: string): string | undefined {
 	return COMMAND_RULES.find((rule) => rule.pattern.test(command))?.reason;
 }
 
-export function commandHabit(command: string): string | undefined {
-	return HABIT_RULES.find((rule) => rule.pattern.test(command))?.reason;
+export function commandHabit(command: string, remote = false): string | undefined {
+	return [...HABIT_RULES, ...(remote ? [] : LOCAL_HABIT_RULES)].find((rule) => rule.pattern.test(command))?.reason;
 }
 
 const expand = (path: string) => (path.startsWith("~/") ? `${homedir()}${path.slice(1)}` : path);
@@ -92,7 +97,7 @@ export default function (pi: ExtensionAPI) {
 		const input = event.input as Record<string, unknown>;
 		if (COMMAND_TOOLS[event.toolName] && typeof input.command === "string") {
 			const command = input.command;
-			const habit = commandHabit(command);
+			const habit = commandHabit(command, Boolean(REMOTE_TOOLS[event.toolName]));
 			if (habit) return { block: true, reason: habit };
 			const violation = commandViolation(command);
 			if (violation && !(await allow(ctx, "Allow blocked command?", `${violation}\n\n${command}`))) {
