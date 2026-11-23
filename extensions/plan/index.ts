@@ -47,7 +47,9 @@ function planViolation(tool: string, input: Record<string, unknown>, dir: string
 		case "replace":
 			return typeof input.path === "string" && insideDir(input.path, dir, cwd) ? undefined : outside;
 		case "edit": {
-			const patch = typeof input.input === "string" ? input.input : "";
+			// pi's own edit names one path; the workspace's hashline edit names its files inside the patch.
+			if (typeof input.input !== "string") return typeof input.path === "string" && insideDir(input.path, dir, cwd) ? undefined : outside;
+			const patch = input.input;
 			const paths = [...patch.matchAll(/^\[([^\]#\n]+)#/gm)].map((m) => m[1] ?? "");
 			if (/^(REM|MV)\b/m.test(patch)) return "Plan mode: deleting or renaming files is not allowed.";
 			return paths.length > 0 && paths.every((path) => insideDir(path, dir, cwd)) ? undefined : outside;
