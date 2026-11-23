@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { AgentToolResult, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -44,6 +46,7 @@ const params = Type.Object({
 	}),
 	run: Type.Optional(Type.String({ description: "run_watch: run id; default every run for the current HEAD commit." })),
 	pr: Type.Optional(Type.String({ description: "pr_view: number, URL, or branch; default the current branch's PR." })),
+	cwd: Type.Optional(Type.String({ description: "Repository checkout to act on; an absolute path, or relative to the session directory. Default the session directory." })),
 });
 
 const check = Type.Object({ name: Type.String(), status: Type.String(), conclusion: Type.Union([Type.String(), Type.Null()]), url: Type.Optional(Type.String()) });
@@ -160,7 +163,9 @@ export default function (pi: ExtensionAPI) {
 		parameters: params,
 		outputSchema,
 		async execute(_id, input: Static<typeof params>, signal, onUpdate, ctx): Promise<AgentToolResult<Details> & { structuredContent: Output }> {
-			const cwd = sessionDir(ctx);
+			const cwd = resolve(sessionDir(ctx), input.cwd ?? ".");
+			// A missing cwd otherwise fails as a misleading "spawn gh ENOENT".
+			if (!existsSync(cwd)) throw new Error(`No directory ${cwd}`);
 			if (input.op === "pr_view") {
 				const pr = await gh<PrView>(cwd, [
 					"pr",
