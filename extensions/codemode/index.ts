@@ -24,7 +24,7 @@ The script is the program; a command runs one external program:
 - Filter, count, sort, and join in JS, not with \`;\` chains or pipes into head, tail, grep, sort, awk, or jq. Prefer a command's --json output with json().
 - Keep intermediate results in variables, or in store()/load() across scripts, not in /tmp files.
 - Structured tools: tools.ls → { entries }, tools.find → { paths }, tools.grep → { lines, files }, tools.read_text → { text, lines }, tools.ssh → like run() on a remote host.
-- Declared tools work here too. Use tools.github, tools.nix, and tools.worktree instead of the gh, nix, and git commands they cover.
+- Declared tools work here too. Use tools.github and tools.nix instead of the gh and nix commands they cover; worktree is a direct call only.
 - Return only what you need to see.
 
 \`\`\`js
