@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -25,6 +26,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: params,
 		async execute(_id, input: Static<typeof params>, _signal, _onUpdate, ctx) {
 			const record = {
+				id: randomUUID(),
 				time: new Date().toISOString(),
 				kind: input.kind,
 				tool: input.tool,
