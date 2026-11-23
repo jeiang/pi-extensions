@@ -46,6 +46,16 @@ test("redirects piped check output without asking, and leaves other pipes alone"
 	assert.equal(commandHabit("git log --oneline | head -5"), undefined);
 });
 
+test("redirects branch switches in a local checkout to the worktree tool, and leaves file restores and remote hosts alone", () => {
+	for (const command of ["git checkout --detach origin/main", "git checkout rex-ssh", "git switch -c x", "git -C ../repo checkout main", "git checkout -b new"]) {
+		assert.match(commandHabit(command) ?? "", /worktree tool/, command);
+	}
+	for (const command of ["git checkout -- src/a.ts", "git checkout HEAD -- a.ts", "git worktree add --detach /tmp/x origin/main", "git log main"]) {
+		assert.equal(commandHabit(command), undefined, command);
+	}
+	assert.equal(commandHabit("git checkout main", true), undefined);
+});
+
 test("finds restricted folders for relative and home paths", () => {
 	assert.equal(restrictedFolder("~/.ssh/id_ed25519", "/tmp"), "~/.ssh");
 	assert.equal(restrictedFolder(".ssh/config", homedir()), "~/.ssh");

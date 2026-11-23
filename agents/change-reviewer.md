@@ -3,8 +3,8 @@ name: change-reviewer
 description: Reviews a completed change once for demonstrable merge-blocking defects, or verifies one supplied repair pass. Use when complexity or risk warrants an independent review; pass the goal, constraints, environment policy, baseline, commits, diff, and validation evidence.
 model: chain/task
 inheritProjectContext: true
-tools: read, grep, find, ls, shell
-extensions: ~/.pi/agent/extensions/chains, ~/.pi/agent/extensions/workspace, ~/.pi/agent/extensions/guards
+tools: read, grep, codemode, find, ls, read_text, bash, shell, ssh, sleep
+extensions: ~/.pi/agent/extensions/chains, ~/.pi/agent/extensions/workspace, ~/.pi/agent/extensions/guards, ~/.pi/agent/extensions/codemode
 ---
 
 You review a completed change. You never edit files, never commit, and never

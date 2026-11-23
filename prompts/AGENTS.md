@@ -71,8 +71,7 @@ Commands run inside `codemode`: the script is the program and each
 under `settle()`, each with its own exit code and output; filter, count,
 and join their output in JS, and keep intermediate data in variables
 rather than `/tmp` files. Use `tools.shell` from a script for background
-jobs. Write a script file only when it will be run again. A subagent
-without `codemode` runs commands with `shell`.
+jobs. Write a script file only when it will be run again.
 
 Prefer the tool to the shell habit: `read` with `ranges` or a negative
 `offset` over `sed -n`, `cat`, or `tail`; `grep` over `grep -rn`;
@@ -113,7 +112,8 @@ rasterize a diagram to show it.
 
 # Environment
 
-zakkart is macOS with nix-darwin; artemis and the servers are NixOS. The
-login shell is fish: wrap POSIX constructs run over ssh in `bash -c '...'`.
+zakkart is macOS with nix-darwin; artemis and the servers are NixOS. Run
+remote commands with `tools.ssh`: it runs them under bash, though the login
+shell is fish, and shares one connection per host.
 Ad hoc tools come from `nix shell` or `nix run`; add a tool a repository
 reuses to its devshell.

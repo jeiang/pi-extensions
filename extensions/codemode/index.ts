@@ -1,4 +1,4 @@
-import { createCodemodeExtension, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createCodemodeExtension, type ExtensionAPI, type ToolDefinition, type ToolLoadout } from "@earendil-works/pi-coding-agent";
 
 /** Helpers every script gets. One line, so the script's own line numbers do not move. */
 export const PRELUDE = [
@@ -23,7 +23,8 @@ The script is the program; a command runs one external program:
 - One program per run(). Independent commands go in separate calls under settle(), so each keeps its own exit code and output and one failure does not hide the rest.
 - Filter, count, sort, and join in JS, not with \`;\` chains or pipes into head, tail, grep, sort, awk, or jq. Prefer a command's --json output with json().
 - Keep intermediate results in variables, or in store()/load() across scripts, not in /tmp files.
-- Structured tools: tools.ls → { entries }, tools.find → { paths }, tools.grep → { lines, files }, tools.read_text → { text, lines }.
+- Structured tools: tools.ls → { entries }, tools.find → { paths }, tools.grep → { lines, files }, tools.read_text → { text, lines }, tools.ssh → like run() on a remote host.
+- Declared tools work here too. Use tools.github, tools.nix, and tools.worktree instead of the gh, nix, and git commands they cover.
 - Return only what you need to see.
 
 \`\`\`js
@@ -75,9 +76,24 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [GUIDELINE],
 		prepareLoadout: original.prepareLoadout
 			? (loadout) => {
-					const result = original.prepareLoadout?.(loadout);
-					const description = result?.descriptions?.[original.name];
-					return result && description ? { ...result, descriptions: { ...result.descriptions, [original.name]: `${description}\n\n${HELPERS}` } } : result;
+					// A codemode tool activated by name, as a subagent's --tools list does, stays callable and is listed here, not declared.
+					const scriptOnly = loadout.declared.filter((tool) => loadout.getExposure(tool.name) === "codemode").map((tool) => tool.name);
+					const view: ToolLoadout = {
+						declared: loadout.declared.filter((tool) => !scriptOnly.includes(tool.name)),
+						callable: loadout.callable,
+						registered: loadout.registered,
+						getExposure: (name) => loadout.getExposure(name),
+						getNamespace: (name) => loadout.getNamespace(name),
+						getPromptGuidelines: (name) => loadout.getPromptGuidelines(name),
+					};
+					const result = original.prepareLoadout?.(view);
+					if (!result) return result;
+					const description = result.descriptions?.[original.name];
+					return {
+						...result,
+						...(description ? { descriptions: { ...result.descriptions, [original.name]: `${description}\n\n${HELPERS}` } } : {}),
+						hiddenDeclarations: [...(result.hiddenDeclarations ?? []), ...scriptOnly],
+					};
 				}
 			: undefined,
 		execute: async (id, params: { code: string }, signal, onUpdate, ctx) => {
