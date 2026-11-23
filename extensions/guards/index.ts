@@ -8,7 +8,9 @@ interface Rule {
 	reason: string;
 }
 
-const COMMAND_TOOLS: Record<string, true> = { bash: true, shell: true };
+const COMMAND_TOOLS: Record<string, true> = { bash: true, shell: true, ssh: true };
+/** Their commands run elsewhere, so a path in them is not a local folder. */
+const REMOTE_TOOLS: Record<string, true> = { ssh: true };
 const PATH_TOOLS: Record<string, true> = { read: true, read_text: true, write: true, edit: true, replace: true, substitute: true, grep: true, find: true, ls: true };
 
 const INSTALL = "Permanent installs are not allowed. Use `nix shell nixpkgs#<pkg> -c <cmd>` or `nix run`, or add the tool to the repository's devshell.";
@@ -96,6 +98,7 @@ export default function (pi: ExtensionAPI) {
 			if (violation && !(await allow(ctx, "Allow blocked command?", `${violation}\n\n${command}`))) {
 				return { block: true, reason: `${violation} If the user asked for it, ask them to run it.` };
 			}
+			if (REMOTE_TOOLS[event.toolName]) return;
 			const folder = commandMentionsRestricted(command) ?? (typeof input.cwd === "string" ? restrictedFolder(input.cwd, sessionDir(ctx)) : undefined);
 			if (folder && !(await allow(ctx, `Allow access to ${folder}?`, command))) {
 				return { block: true, reason: `${folder} is restricted. Ask the user before touching it.` };

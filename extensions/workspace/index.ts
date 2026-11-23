@@ -18,6 +18,7 @@ import { hashlineTools } from "./hashline.ts";
 import { registerInterrupt } from "./interrupt.ts";
 import { readTextTool, structuredFind, structuredLs } from "./listing.ts";
 import { cwdParam, registerShell } from "./shell.ts";
+import { registerSsh } from "./ssh.ts";
 import { registerSubagent } from "./subagent.ts";
 import { substituteTool } from "./substitute.ts";
 import {
@@ -150,6 +151,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		execute: (_id, params, signal, onUpdate) => shell.bash(params, signal, onUpdate),
 	});
+	registerSsh(pi, shell);
 	registerSubagent(pi, { cwd: () => cwd(), env });
 	registerInterrupt(pi);
 	pi.registerTool({

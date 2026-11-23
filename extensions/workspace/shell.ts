@@ -217,7 +217,8 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return `${job.id} [${state}, ${duration((job.ended ?? Date.now()) - job.started)}] ${job.command}\nlog: ${job.log}`;
 	};
 
-	const start = async (command: string, cwd: string): Promise<Job> => {
+	/** `label` stands in for `command` in summaries, for a command that is not worth reading. */
+	const start = async (command: string, cwd: string, label = command): Promise<Job> => {
 		mkdirSync(logDir, { recursive: true });
 		const id = `job${next++}`;
 		const log = join(logDir, `${process.pid}-${id}.log`);
@@ -233,7 +234,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			if (overwrite && line === "") return;
 			for (const listener of listeners) listener(line, overwrite);
 		};
-		const job: Job = { id, command, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, done: Promise.resolve() };
+		const job: Job = { id, command: label, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, done: Promise.resolve() };
 		job.done = ops
 			.exec(command, cwd, {
 				signal: controller.signal,
@@ -340,11 +341,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 
 	/** The codemode `bash` tool: pi's result shape, run as a job so that an interrupt leaves the command running. */
 	const bash = async (
-		input: { command: string; timeout?: number; cwd?: string; tail?: number },
+		input: { command: string; timeout?: number; cwd?: string; tail?: number; label?: string },
 		signal: AbortSignal | undefined,
 		onUpdate: AgentToolUpdateCallback<undefined> | undefined,
 	) => {
-		const job = await start(input.command, dirOf(input.cwd));
+		const job = await start(input.command, dirOf(input.cwd), input.label);
 		const unfollow = follow(job, onUpdate);
 		const why = await waitFor(job, undefined, input.timeout, signal);
 		unfollow();
@@ -435,5 +436,12 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		},
 	});
 
-	return { bash };
+	/** Starts `command` as a background job that wakes the session when it exits. */
+	const background = async (command: string, label: string) => {
+		const job = await start(command, dirOf(), label);
+		reportExit(job);
+		return { ...text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`), structuredContent: shape(job, "") };
+	};
+
+	return { bash, background, env: options.env, dirOf };
 }
