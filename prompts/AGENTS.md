@@ -71,8 +71,7 @@ Commands run inside `codemode`: the script is the program and each
 under `settle()`, each with its own exit code and output; filter, count,
 and join their output in JS, and keep intermediate data in variables
 rather than `/tmp` files. Use `tools.shell` from a script for background
-jobs. Write a script file only when it will be run again. A subagent
-without `codemode` runs commands with `shell`.
+jobs. Write a script file only when it will be run again.
 
 Prefer the tool to the shell habit: `read` with `ranges` or a negative
 `offset` over `sed -n`, `cat`, or `tail`; `grep` over `grep -rn`;

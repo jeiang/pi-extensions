@@ -1,4 +1,4 @@
-import { createCodemodeExtension, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createCodemodeExtension, type ExtensionAPI, type ToolDefinition, type ToolLoadout } from "@earendil-works/pi-coding-agent";
 
 /** Helpers every script gets. One line, so the script's own line numbers do not move. */
 export const PRELUDE = [
@@ -76,9 +76,24 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [GUIDELINE],
 		prepareLoadout: original.prepareLoadout
 			? (loadout) => {
-					const result = original.prepareLoadout?.(loadout);
-					const description = result?.descriptions?.[original.name];
-					return result && description ? { ...result, descriptions: { ...result.descriptions, [original.name]: `${description}\n\n${HELPERS}` } } : result;
+					// A codemode tool activated by name, as a subagent's --tools list does, stays callable and is listed here, not declared.
+					const scriptOnly = loadout.declared.filter((tool) => loadout.getExposure(tool.name) === "codemode").map((tool) => tool.name);
+					const view: ToolLoadout = {
+						declared: loadout.declared.filter((tool) => !scriptOnly.includes(tool.name)),
+						callable: loadout.callable,
+						registered: loadout.registered,
+						getExposure: (name) => loadout.getExposure(name),
+						getNamespace: (name) => loadout.getNamespace(name),
+						getPromptGuidelines: (name) => loadout.getPromptGuidelines(name),
+					};
+					const result = original.prepareLoadout?.(view);
+					if (!result) return result;
+					const description = result.descriptions?.[original.name];
+					return {
+						...result,
+						...(description ? { descriptions: { ...result.descriptions, [original.name]: `${description}\n\n${HELPERS}` } } : {}),
+						hiddenDeclarations: [...(result.hiddenDeclarations ?? []), ...scriptOnly],
+					};
 				}
 			: undefined,
 		execute: async (id, params: { code: string }, signal, onUpdate, ctx) => {
