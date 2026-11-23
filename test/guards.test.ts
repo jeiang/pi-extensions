@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { test } from "node:test";
 import codemode from "../extensions/codemode/index.ts";
-import guards, { commandHabit, commandViolation, maskSecrets, restrictedFolder } from "../extensions/guards/index.ts";
+import guards, { commandHabit, commandViolation, maskSecrets, restrictedFolder, switchesBranch } from "../extensions/guards/index.ts";
 import workspace from "../extensions/workspace/index.ts";
 import { createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -46,14 +46,23 @@ test("redirects piped check output without asking, and leaves other pipes alone"
 	assert.equal(commandHabit("git log --oneline | head -5"), undefined);
 });
 
-test("redirects branch switches in a local checkout to the worktree tool, and leaves file restores and remote hosts alone", () => {
-	for (const command of ["git checkout --detach origin/main", "git checkout rex-ssh", "git switch -c x", "git -C ../repo checkout main", "git checkout -b new"]) {
-		assert.match(commandHabit(command) ?? "", /worktree tool/, command);
+test("finds branch switches in the session checkout, not file restores, other repositories, or text that mentions one", () => {
+	for (const command of ["git checkout --detach origin/main", "git checkout rex-ssh", "git switch -c x", "git fetch && git checkout -b new", "git checkout \"my branch\""]) {
+		assert.equal(switchesBranch(command), true, command);
 	}
-	for (const command of ["git checkout -- src/a.ts", "git checkout HEAD -- a.ts", "git worktree add --detach /tmp/x origin/main", "git log main"]) {
-		assert.equal(commandHabit(command), undefined, command);
+	for (const command of [
+		"git checkout -- src/a.ts",
+		"git checkout HEAD -- a.ts",
+		"git worktree add --detach /tmp/x origin/main",
+		"git -C /tmp/clone checkout main",
+		"cd /tmp/clone && git checkout main",
+		"gh pr create --body 'redirects git checkout <rev> / git switch'",
+		'git commit -m "guard git switch"',
+		"gh pr create --body-file - <<'EOF'\nblocks git checkout main\nEOF",
+		"rg 'git switch' src",
+	]) {
+		assert.equal(switchesBranch(command), false, command);
 	}
-	assert.equal(commandHabit("git checkout main", true), undefined);
 });
 
 test("finds restricted folders for relative and home paths", () => {
