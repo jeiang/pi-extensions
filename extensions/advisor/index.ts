@@ -122,6 +122,8 @@ export function createAdvisor(config: AdvisorConfig) {
 		let seen: { prompt: string; count: number; last?: number } | undefined;
 		let advisedThisInput = false;
 		let acted = false;
+		// The user reviews a proposed plan; the advisor would only delay that review.
+		let proposed = false;
 
 		const setToolActive = () => {
 			const others = pi.getActiveTools().filter((name) => name !== "advise");
@@ -223,10 +225,12 @@ export function createAdvisor(config: AdvisorConfig) {
 		pi.on("input", () => {
 			advisedThisInput = false;
 			acted = false;
+			proposed = false;
 		});
 
 		pi.on("tool_call", (event) => {
 			if (ACTING_TOOLS[event.toolName]) acted = true;
+			if (event.toolName === "propose") proposed = true;
 		});
 
 		pi.registerMessageRenderer<undefined>("advisor", (message, { expanded }, theme) =>
@@ -237,7 +241,7 @@ export function createAdvisor(config: AdvisorConfig) {
 
 		// The last actionable point of a run: the agent continues in the same run and restates its report.
 		pi.on("agent_before_settle", async (event, ctx) => {
-			if (!enabled || event.outcome !== "completed" || advisedThisInput || !acted) return;
+			if (!enabled || event.outcome !== "completed" || advisedThisInput || !acted || proposed) return;
 			const { answer: advice, usage } = await ask(ctx, "Review the agent's latest run.", ctx.signal).catch((error: Error) => {
 				if (ctx.hasUI) ctx.ui.notify(`Advisor failed: ${error.message}`, "warning");
 				return { answer: undefined, usage: undefined };
