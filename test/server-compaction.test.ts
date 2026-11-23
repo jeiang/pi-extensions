@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import serverCompaction from "../extensions/server-compaction/index.ts";
+import { createTestSession } from "./harness.ts";
 import {
 	type Checkpoint,
 	COMPACTION_BETA,
@@ -158,4 +162,107 @@ test("reads valid session details and rejects malformed ones", () => {
 	assert.equal(readDetails({ readFiles: [], modifiedFiles: [] }), undefined);
 	assert.equal(readDetails({ ...details, checkpoint: { ...codex, item: { type: "compaction" } } }), undefined);
 	assert.equal(readDetails({ ...details, checkpoint: { ...anthropic, block: { content: 1 } } }), undefined);
+});
+
+type Input = { role?: string; type?: string; content?: { text: string }[] };
+
+/**
+ * A Codex provider that plays the compaction protocol: a trigger gets one compaction item, pi's
+ * summary prompt gets "TEXT SUMMARY", anything else "ok". `fail` names calls that error instead.
+ */
+function fakeCodex(requests: Input[][], fail: Set<"native" | "text">): ExtensionFactory {
+	return (pi) => {
+		pi.registerProvider("openai-codex", {
+			baseUrl: "http://localhost",
+			apiKey: "test",
+			api: "openai-codex-responses",
+			models: [
+				{ id: "m", name: "m", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 1000 },
+			],
+			streamSimple: (model, context, options) => {
+				const stream = createAssistantMessageEventStream();
+				void (async () => {
+					const text = (content: unknown) =>
+						typeof content === "string" ? content : (content as { text?: string }[]).map((part) => part.text ?? "").join("");
+					const built = {
+						model: model.id,
+						input: context.messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: [{ type: "input_text", text: text(m.content) }] })),
+					};
+					const payload = ((await options?.onPayload?.(built, model)) ?? built) as { input: Input[] };
+					requests.push(payload.input);
+					const native = payload.input.some((entry) => entry.type === "compaction_trigger");
+					const summarizing = !native && payload.input.some((entry) => entry.content?.some((part) => part.text.includes("<conversation>")));
+					const kind = native ? "native" : summarizing ? "text" : undefined;
+					const message: AssistantMessage = {
+						role: "assistant", api: model.api, provider: model.provider, model: model.id,
+						content: [{ type: "text", text: native ? "" : summarizing ? "TEXT SUMMARY" : "ok" }],
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+						stopReason: "stop", timestamp: Date.now(),
+					};
+					if (kind && fail.delete(kind)) {
+						stream.push({ type: "error", reason: "error", error: { ...message, stopReason: "error", errorMessage: `${kind} rejected` } });
+					} else {
+						if (native) {
+							await options?.onProviderStreamEvent?.({ type: "response.output_item.done", item }, model);
+							await options?.onProviderStreamEvent?.({ type: "response.completed", response: { status: "completed" } }, model);
+						}
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+					}
+					stream.end();
+				})();
+				return stream;
+			},
+		});
+	};
+}
+
+async function codexSession(fail: ("native" | "text")[] = []) {
+	const requests: Input[][] = [];
+	const { session } = await createTestSession({
+		extensions: [fakeCodex(requests, new Set(fail)), serverCompaction],
+		model: ["openai-codex", "m"],
+		settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+	});
+	await session.prompt("first");
+	await session.prompt("second");
+	const lastCompaction = () => session.sessionManager.getEntries().filter((entry) => entry.type === "compaction").at(-1);
+	return { session, requests, lastCompaction };
+}
+
+const hasItem = (input: Input[]) => input.some((entry) => entry.type === "compaction");
+const hasText = (input: Input[], text: string) => input.some((entry) => entry.content?.some((part) => part.text.includes(text)));
+
+test("a session saves the checkpoint and replays it on the next request", async () => {
+	const { session, requests, lastCompaction } = await codexSession();
+	await session.compact();
+	const entry = lastCompaction();
+	assert.equal(entry?.type === "compaction" && entry.fromHook, true);
+	assert.deepEqual(readDetails(entry?.type === "compaction" ? entry.details : undefined)?.checkpoint, { ...codex, model: "m" });
+	await session.prompt("third");
+	assert.ok(hasItem(requests.at(-1) ?? []));
+});
+
+test("a rejected server compaction falls back to pi's summary", async () => {
+	const { session, lastCompaction } = await codexSession(["native"]);
+	await session.compact();
+	const entry = lastCompaction();
+	assert.equal(entry?.type === "compaction" && !entry.fromHook && entry.summary.includes("TEXT SUMMARY"), true);
+});
+
+test("a failed text summary after a server compaction falls back to pi's summary", async () => {
+	const { session, lastCompaction } = await codexSession(["text"]);
+	await session.compact();
+	const entry = lastCompaction();
+	assert.equal(entry?.type === "compaction" && !entry.fromHook, true);
+});
+
+test("server compaction includes an earlier summary that pi wrote", async () => {
+	const { session, requests } = await codexSession(["native"]);
+	await session.compact();
+	await session.prompt("third");
+	await session.prompt("fourth");
+	await session.compact();
+	const nativeRequest = requests.findLast((input) => input.some((entry) => entry.type === "compaction_trigger"));
+	assert.ok(nativeRequest && hasText(nativeRequest, "TEXT SUMMARY"));
 });

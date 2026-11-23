@@ -76,7 +76,8 @@ export default function (pi: ExtensionAPI) {
 			.filter((tool) => active.has(tool.name))
 			.map(({ name, description, parameters }) => ({ name, description, parameters }));
 		const messages = [
-			...(previous ? [summaryMessage(previous.summary)] : []),
+			// The earlier summary, whoever wrote it; replay swaps in its checkpoint when this extension did.
+			...(preparation.previousSummary ? [summaryMessage(preparation.previousSummary)] : []),
 			...convertToLlm([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]),
 		].filter((message) => message.role !== "system");
 		const instructions = customInstructions
