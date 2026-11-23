@@ -39,8 +39,20 @@ const SWITCH =
 
 /** Habits with a better tool: blocked with the redirect at once, never put to the user. */
 export const HABIT_RULES: Rule[] = [{ pattern: /2>&1\s*\|\s*(tail|head|grep)\b/, reason: PIPED }];
-/** Habits that matter only on this machine, not in a command run over ssh. A `--` pathspec restores files, which is fine. */
-const LOCAL_HABIT_RULES: Rule[] = [{ pattern: /\bgit\s+(-C\s+\S+\s+)?(switch\b|checkout\b(?![^|;&\n]*\s--(\s|$)))/, reason: SWITCH }];
+
+/** `command` without heredoc bodies and quoted strings, so text that only mentions a command does not count. */
+export function unquoted(command: string): string {
+	return command.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\n|$)/g, "").replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
+}
+
+/**
+ * Whether `command` switches the branch of the checkout it runs in: `git switch` or `git checkout` as a command,
+ * not a `--` file restore. A `cd` or `git -C` points it at another repository, which is left alone.
+ */
+export function switchesBranch(command: string): boolean {
+	const plain = unquoted(command);
+	return !/(^|[;&|(\n]\s*)cd\s/.test(plain) && /(^|[;&|(\n]\s*)git\s+(switch\b|checkout\b(?![^|;&\n]*\s--(\s|$)))/.test(plain);
+}
 
 const RESTRICTED = ["~/.ssh", "~/.gnupg", "~/.config/sops", "/etc"];
 
@@ -59,8 +71,8 @@ export function commandViolation(command: string): string | undefined {
 	return COMMAND_RULES.find((rule) => rule.pattern.test(command))?.reason;
 }
 
-export function commandHabit(command: string, remote = false): string | undefined {
-	return [...HABIT_RULES, ...(remote ? [] : LOCAL_HABIT_RULES)].find((rule) => rule.pattern.test(command))?.reason;
+export function commandHabit(command: string): string | undefined {
+	return HABIT_RULES.find((rule) => rule.pattern.test(command))?.reason;
 }
 
 const expand = (path: string) => (path.startsWith("~/") ? `${homedir()}${path.slice(1)}` : path);
@@ -97,13 +109,17 @@ export default function (pi: ExtensionAPI) {
 		const input = event.input as Record<string, unknown>;
 		if (COMMAND_TOOLS[event.toolName] && typeof input.command === "string") {
 			const command = input.command;
-			const habit = commandHabit(command, Boolean(REMOTE_TOOLS[event.toolName]));
+			const habit = commandHabit(command);
 			if (habit) return { block: true, reason: habit };
 			const violation = commandViolation(command);
 			if (violation && !(await allow(ctx, "Allow blocked command?", `${violation}\n\n${command}`))) {
 				return { block: true, reason: `${violation} If the user asked for it, ask them to run it.` };
 			}
 			if (REMOTE_TOOLS[event.toolName]) return;
+			const elsewhere = typeof input.cwd === "string" && resolve(sessionDir(ctx), input.cwd) !== sessionDir(ctx);
+			if (!elsewhere && switchesBranch(command) && !(await allow(ctx, "Allow branch switch in the session checkout?", command))) {
+				return { block: true, reason: SWITCH };
+			}
 			const folder = commandMentionsRestricted(command) ?? (typeof input.cwd === "string" ? restrictedFolder(input.cwd, sessionDir(ctx)) : undefined);
 			if (folder && !(await allow(ctx, `Allow access to ${folder}?`, command))) {
 				return { block: true, reason: `${folder} is restricted. Ask the user before touching it.` };
