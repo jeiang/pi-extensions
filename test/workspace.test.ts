@@ -29,6 +29,8 @@ async function session(cwd: string, replies: Reply[]) {
 		extensions: [scriptedProviders((_m, _c, i) => replies[i] ?? { text: "done" }, calls), workspace],
 		model: ["p1", "m"],
 		cwd,
+		// shell is codemode-only; activating it declares it, as for a subagent that lists it.
+		settings: { defaultTools: ["+shell"] },
 	});
 	return { session, calls };
 }

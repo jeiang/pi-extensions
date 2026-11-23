@@ -379,8 +379,9 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		name: "shell",
 		label: "Shell",
 		description:
-			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout`, or when the user interrupts, moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Every result names the log file holding the full output: pass `tail` for the end, then read (offset/limit) or grep the log instead of piping into tail, head, or grep. Scripts get { job, status, exit_code, log, output }.",
+			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout`, or when the user interrupts, moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Every result names the log file holding the full output: pass `tail` for the end, then read (offset/limit) or grep the log instead of piping into tail, head, or grep. Scripts get { job, status, exit_code, log, output }; for one foreground command, run() is simpler.",
 		promptSnippet: "Run processes (builds, tests, git, nix, ssh); background jobs with early return",
+		exposure: "codemode",
 		parameters: params,
 		outputSchema: shellOutputSchema,
 		async execute(_id, input: Params, signal, onUpdate, ctx: ExtensionToolContext) {

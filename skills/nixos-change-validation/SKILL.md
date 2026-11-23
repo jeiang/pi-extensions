@@ -35,7 +35,7 @@ Run the narrowest repository-supported evaluation or build that proves the affec
 
 When a change is intended to preserve behavior, prove it: `drv_diff` with the affected hosts compares each toplevel's drvPath in the working tree against `base` (default `HEAD`); `same: true` is the proof. State what the comparison cannot cover. New files count only once `git add` has staged them; `drv_diff` names untracked `.nix` files it could not see.
 
-Keep a check's full output. `shell` writes every command's output to the log file named in its result; pass `tail` for the end and read or grep the log for the error.
+Keep a check's full output. `run()` writes every command's output to the log file named in its result; pass `tail` for the end and grep the log for the error.
 
 Before pushing an input bump or package change, run `dry_run` on the affected outputs. `build` lists what no configured cache has (cache.nixos.org, the repository's own caches); `heavy` marks builds flagged big-parallel or named like a compiler, kernel, or browser, as a hint rather than proof, so read `build` itself too. A heavy or long `build` list means CI will build from source: report it before opening the pull request. `cache` checks a single path against every substituter; garret reports a miss during a slow database read the same as a real miss, so treat its `missing` as unconfirmed. Use the repository's way to prebuild and push if one exists, but ask the user first when the list holds more than a few dozen derivations or a full toolchain; waiting for the upstream cache can be the better choice.
 
