@@ -152,15 +152,24 @@ export async function removeWorktree(root: string, path: string, force: boolean)
 	return undefined;
 }
 
-/** Removes clean worktrees, and their branches, whose work is merged into `base`. */
+/** True when `tip` has commits off `base`'s first-parent line and merging it into `base` would change nothing. */
+async function mergedInto(root: string, base: string, mainline: Set<string>, tip: string): Promise<boolean> {
+	if (mainline.has(tip)) return false;
+	if ((await tryGit(root, "merge-base", "--is-ancestor", tip, base)) !== undefined) return true;
+	// A squash or rebase merge leaves the tip off base; its changes are in base when a merge adds nothing.
+	const merge = await tryGit(root, "merge-tree", "--write-tree", base, tip);
+	return merge !== undefined && merge.split("\n")[0] === (await git(root, "rev-parse", `${base}^{tree}`));
+}
+
+/** Removes clean worktrees, and their branches, whose work is merged into `base` by a merge, squash, or rebase. */
 export async function pruneWorktrees(root: string, base: string): Promise<string[]> {
-	// main merges pull requests with merge commits, so an unused branch sits on its first-parent line and merged work does not.
+	// An unused branch sits on base's first-parent line; it would look merged.
 	const mainline = new Set((await git(root, "rev-list", "--first-parent", base)).split("\n"));
 	const removed: string[] = [];
 	for (const w of await ownWorktrees(root)) {
 		if (!w.branch) continue;
 		const tip = await tryGit(root, "rev-parse", w.branch);
-		if (!tip || mainline.has(tip) || (await tryGit(root, "merge-base", "--is-ancestor", tip, base)) === undefined) continue;
+		if (!tip || !(await mergedInto(root, base, mainline, tip))) continue;
 		if ((await tryGit(w.path, "status", "--porcelain")) !== "") continue;
 		await git(root, "worktree", "remove", w.path);
 		await tryGit(root, "branch", "-D", w.branch);

@@ -158,7 +158,7 @@ test("remove refuses a worktree with uncommitted changes and keeps the branch", 
 	execFileSync("git", ["rev-parse", "--verify", "refs/heads/rm"], { cwd: dir });
 });
 
-test("prune removes merged worktrees only, never unused, unmerged, dirty, or nested ones", async () => {
+test("prune removes merged and squash-merged worktrees only, never unused, unmerged, extended, dirty, or nested ones", async () => {
 	const dir = repo();
 	const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 	const commit = (cwd: string, file: string) => {
@@ -170,6 +170,8 @@ test("prune removes merged worktrees only, never unused, unmerged, dirty, or nes
 	const dirty = await createWorktree(dir, "dirty");
 	const unmerged = await createWorktree(dir, "unmerged");
 	const unused = await createWorktree(dir, "unused");
+	const squashed = await createWorktree(dir, "squashed");
+	const extended = await createWorktree(dir, "extended");
 	commit(merged.path, "m");
 	commit(dirty.path, "d");
 	commit(unmerged.path, "u");
@@ -178,10 +180,19 @@ test("prune removes merged worktrees only, never unused, unmerged, dirty, or nes
 	git(dir, "worktree", "add", "-q", "-b", "pi-subagents/child", nested, "main");
 	commit(nested, "n");
 	git(dir, "merge", "-q", "--no-ff", "-m", "merge", "merged", "dirty", "pi-subagents/child");
+	commit(squashed.path, "s1");
+	commit(squashed.path, "s2");
+	commit(extended.path, "e1");
+	for (const branch of ["squashed", "extended"]) {
+		git(dir, "merge", "-q", "--squash", branch);
+		git(dir, "commit", "-qm", `squash ${branch}`);
+	}
+	commit(extended.path, "e2");
+	commit(dir, "later");
 	const removed = await pruneWorktrees(dir, "main");
-	assert.deepEqual(removed, [`${merged.path} (merged)`]);
-	for (const kept of [dirty.path, unmerged.path, unused.path, nested]) assert.equal(existsSync(kept), true);
-	assert.equal(git(dir, "branch", "--list", "merged"), "");
+	assert.deepEqual(removed.sort(), [`${merged.path} (merged)`, `${squashed.path} (squashed)`]);
+	for (const kept of [dirty.path, unmerged.path, unused.path, extended.path, nested]) assert.equal(existsSync(kept), true);
+	assert.equal(git(dir, "branch", "--list", "merged", "squashed"), "");
 });
 
 test("a background job returns at the first matching line and keeps running", async () => {
