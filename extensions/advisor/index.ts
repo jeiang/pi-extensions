@@ -6,6 +6,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { LEVELS, parseTarget } from "../chains/index.ts";
 import { addUsage } from "../footer/cost.ts";
+import { setReviewer } from "./review.ts";
 
 export interface AdvisorConfig {
 	/** `provider/model:level` targets tried in order until one answers. */
@@ -122,6 +123,8 @@ export function createAdvisor(config: AdvisorConfig) {
 		let seen: { prompt: string; count: number; last?: number } | undefined;
 		let advisedThisInput = false;
 		let acted = false;
+		// propose has the plan reviewed; reviewing the run again would only delay the user's review.
+		let proposed = false;
 
 		const setToolActive = () => {
 			const others = pi.getActiveTools().filter((name) => name !== "advise");
@@ -140,6 +143,12 @@ export function createAdvisor(config: AdvisorConfig) {
 			enabled = state?.enabled ?? true;
 			targets = (state?.models ?? config.models).map(parseTarget);
 			setToolActive();
+			setReviewer(ctx, (ctx, request, signal) => {
+				if (!enabled) return undefined;
+				return ask(ctx, request, signal).then(({ answer, usage }) =>
+					answer === undefined ? { answered: false, serious: "", nits: "", usage } : LGTM.test(answer) ? { answered: true, serious: "", nits: "", usage } : { answered: true, ...parseAdvice(answer), usage },
+				);
+			});
 		};
 		pi.on("session_start", restore);
 		pi.on("session_tree", restore);
@@ -223,10 +232,12 @@ export function createAdvisor(config: AdvisorConfig) {
 		pi.on("input", () => {
 			advisedThisInput = false;
 			acted = false;
+			proposed = false;
 		});
 
 		pi.on("tool_call", (event) => {
 			if (ACTING_TOOLS[event.toolName]) acted = true;
+			if (event.toolName === "propose") proposed = true;
 		});
 
 		pi.registerMessageRenderer<undefined>("advisor", (message, { expanded }, theme) =>
@@ -237,7 +248,7 @@ export function createAdvisor(config: AdvisorConfig) {
 
 		// The last actionable point of a run: the agent continues in the same run and restates its report.
 		pi.on("agent_before_settle", async (event, ctx) => {
-			if (!enabled || event.outcome !== "completed" || advisedThisInput || !acted) return;
+			if (!enabled || event.outcome !== "completed" || advisedThisInput || !acted || proposed) return;
 			const { answer: advice, usage } = await ask(ctx, "Review the agent's latest run.", ctx.signal).catch((error: Error) => {
 				if (ctx.hasUI) ctx.ui.notify(`Advisor failed: ${error.message}`, "warning");
 				return { answer: undefined, usage: undefined };
