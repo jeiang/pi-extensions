@@ -188,7 +188,9 @@ test("prune removes merged and squash-merged worktrees only, never unused, unmer
 		git(dir, "commit", "-qm", `squash ${branch}`);
 	}
 	commit(extended.path, "e2");
-	commit(dir, "later");
+	// A later edit on main to a squashed file makes a merge of the branch into main's tip conflict.
+	writeFileSync(join(dir, "s1"), "edited\n");
+	git(dir, "commit", "-qam", "edit s1");
 	const tip = (branch: string) => git(dir, "rev-parse", "--short=12", branch).trim();
 	const tips = { merged: tip("merged"), squashed: tip("squashed") };
 	const removed = await pruneWorktrees(dir, "main");

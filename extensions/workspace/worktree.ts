@@ -152,14 +152,23 @@ export async function removeWorktree(root: string, path: string, force: boolean)
 	return undefined;
 }
 
-/** True when `tip` has commits off `base`'s first-parent line and merging it into `base` would change nothing. */
+/** True when `tip` has commits off `base`'s first-parent line and merging it into one of those commits would change nothing. */
 async function mergedInto(root: string, base: string, mainline: Set<string>, tip: string): Promise<boolean> {
 	if (mainline.has(tip)) return false;
 	if ((await tryGit(root, "merge-base", "--is-ancestor", tip, base)) !== undefined) return true;
-	// A squash or rebase merge leaves the tip off base; its changes are in base when a merge adds nothing.
+	// A squash or rebase merge leaves the tip off base. Later edits on base can make a merge into its tip conflict,
+	// so try each first-parent commit since the fork that touched the branch's files; the squash commit is one.
 	// Later commits that change no content pass too, so prune reports each removed tip.
-	const merge = await tryGit(root, "merge-tree", "--write-tree", base, tip);
-	return merge !== undefined && merge.split("\n")[0] === (await git(root, "rev-parse", `${base}^{tree}`));
+	const fork = await tryGit(root, "merge-base", base, tip);
+	if (!fork) return false;
+	const files = (await git(root, "diff", "--name-only", "--no-renames", fork, tip)).split("\n").filter(Boolean);
+	if (files.length === 0) return false;
+	const candidates = (await git(root, "rev-list", "--first-parent", `${fork}..${base}`, "--", ...files)).split("\n").filter(Boolean);
+	for (const commit of candidates) {
+		const merge = await tryGit(root, "merge-tree", "--write-tree", commit, tip);
+		if (merge !== undefined && merge.split("\n")[0] === (await git(root, "rev-parse", `${commit}^{tree}`))) return true;
+	}
+	return false;
 }
 
 /** Removes clean worktrees, and their branches, whose work is merged into `base` by a merge, squash, or rebase. */
