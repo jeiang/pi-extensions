@@ -44,7 +44,7 @@ test("the wrapped codemode lists the helpers and runs them after an options line
 });
 
 test("a // @background script returns at once and wakes the session with its output", async () => {
-	const run = await script('// @background\nawait sleep(1);\nreturn (await sh("echo late")).trim();', { tool: "shell", args: { command: "sleep 2" } });
+	const run = await script('// @background\nawait sleep(1);\nreturn (await sh("echo late")).trim();', { tool: "codemode", args: { code: "await sleep(2);" } });
 	assert.match(run.result, /in the background/);
 	assert.match(run.woken.join("\n"), /finished:[\s\S]*late/);
 });

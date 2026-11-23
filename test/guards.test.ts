@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { test } from "node:test";
-import { commandHabit, commandViolation, maskSecrets, restrictedFolder } from "../extensions/guards/index.ts";
+import codemode from "../extensions/codemode/index.ts";
+import guards, { commandHabit, commandViolation, maskSecrets, restrictedFolder } from "../extensions/guards/index.ts";
+import workspace from "../extensions/workspace/index.ts";
+import { createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
 test("blocks permanent installs and history rewrites", () => {
 	for (const command of [
@@ -49,6 +52,27 @@ test("finds restricted folders for relative and home paths", () => {
 	assert.equal(restrictedFolder("/etc/hosts", "/tmp"), "/etc");
 	assert.equal(restrictedFolder("~/.sshd", "/tmp"), undefined);
 	assert.equal(restrictedFolder("src/etc/file", "/repo"), undefined);
+});
+
+test("a script's read_text into a restricted folder is blocked without a user to ask", async () => {
+	const results: string[] = [];
+	const { session } = await createTestSession({
+		extensions: [
+			scriptedProviders((_m, context, i): Reply => {
+				const last = context.messages.at(-1);
+				if (last?.role === "toolResult") results.push(last.content.map((c) => (c.type === "text" ? c.text : "")).join("\n"));
+				return i === 0 ? { tool: "codemode", args: { code: 'return (await tools.read_text({ path: "/etc/hosts" })).text;' } } : { text: "done" };
+			}, []),
+			guards,
+			workspace,
+			codemode,
+		],
+		model: ["p1", "m"],
+		settings: { defaultTools: ["+codemode"] },
+	});
+	await session.prompt("go");
+	session.dispose();
+	assert.match(results[0] ?? "", /\/etc is restricted/);
 });
 
 test("masks secrets and keeps other text", () => {

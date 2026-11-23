@@ -13,20 +13,43 @@ export const PRELUDE = [
 ].join(" ");
 
 const HELPERS = `Helpers defined in every script:
-- run(cmd, { cwd, tail, timeout }) → { output, exit_code, log }; sh(cmd, { check = true, ... }) → output, throws on a non-zero exit; json(cmd, opts) → parsed output.
+- run(cmd, { cwd, tail, timeout }) → { output, exit_code, log, truncated }, also for a non-zero exit; output holds up to 1 MiB. sh(cmd, { check = true, ... }) → output, throws on a non-zero exit; json(cmd, opts) → parsed output.
 - settle(promises) → each value, or "Error: …" for a rejection. mapLimit(items, n, fn) runs fn at most n at a time.
 - sleep(s); poll(fn, { every = 15, timeout = 600 }) → the first truthy fn() result.
 - job(cmd, { wait_on, wait_seconds }) → a background shell job { job, status, log }; tools.shell({ action: "wait", job, wait_on }) waits on it. You are woken when it exits.
 A first line \`// @background\` runs the whole script in the background: the call returns at once and you are woken with its output. It holds one of two script workers until it ends, so give it a timeout_ms on a second \`// @options\` line.
-Branch on results in the script instead of taking another turn:
+
+The script is the program; a command runs one external program:
+- One program per run(). Independent commands go in separate calls under settle(), so each keeps its own exit code and output and one failure does not hide the rest.
+- Filter, count, sort, and join in JS, not with \`;\` chains or pipes into head, tail, grep, sort, awk, or jq. Prefer a command's --json output with json().
+- Keep intermediate results in variables, or in store()/load() across scripts, not in /tmp files.
+- Structured tools: tools.ls → { entries }, tools.find → { paths }, tools.grep → { lines, files }, tools.read_text → { text, lines }.
+- Return only what you need to see.
+
 \`\`\`js
-const r = await run("npm test", { tail: 40 });
+const [log, status, top, readme] = await settle([
+  sh("git log --oneline -20"),
+  sh("git status --short"),
+  tools.ls({ path: "." }),
+  tools.read_text({ path: "README.md" }),
+]);
+return { log, status, dirs: top.entries?.filter((e) => e.endsWith("/")), readme: readme.text?.slice(0, 1500) };
+\`\`\`
+\`\`\`js
+const files = (await sh("git ls-files")).split("\\n").filter(Boolean);
+const perDir = {};
+for (const f of files) { const d = f.split("/").slice(0, 2).join("/"); perDir[d] = (perDir[d] ?? 0) + 1; }
+return Object.entries(perDir).sort((a, b) => b[1] - a[1]).slice(0, 30);
+\`\`\`
+\`\`\`js
+const r = await run("npm test", { tail: 40, timeout: 600 });
 if (r.exit_code === 0) return "tests pass";
-return tools.grep({ pattern: "FAIL|Error", path: r.log, context: 2 });
+const { lines } = await tools.grep({ pattern: "FAIL|Error", path: r.log, context: 2 });
+return { tail: r.output, failures: lines.map((l) => l.text) };
 \`\`\``;
 
 const GUIDELINE =
-	"Use codemode when a step depends on another's result (an exit code, a match, a JSON field): branch in the script instead of taking another turn. Prefer --json output with json(); batch independent calls with settle().";
+	"Run commands through codemode and write the work as a JS program: one external program per run(), independent commands in parallel with settle(), output filtered and joined in JS instead of pipes, `;` chains, or /tmp files.";
 
 /** Puts the prelude in a block around the script, after the options line if there is one. */
 export function withPrelude(code: string): string {
@@ -34,7 +57,7 @@ export function withPrelude(code: string): string {
 	return `${options}${PRELUDE} {${code.slice(options.length)}\n}`;
 }
 
-/** Captures the built-in codemode tool and re-registers it with the helpers and a guideline about branching. */
+/** Captures the built-in codemode tool and re-registers it with the helpers and a guideline about writing programs. */
 export default function (pi: ExtensionAPI) {
 	let builtin: ToolDefinition | undefined;
 	const capture = new Proxy(pi, {
