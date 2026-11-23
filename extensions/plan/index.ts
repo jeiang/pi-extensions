@@ -90,6 +90,7 @@ function findPlan(dir: string, slug: string): string | undefined {
 export default function (pi: ExtensionAPI) {
 	let state: PlanState = { enabled: false };
 	let reviewPending = false;
+	let reviewing = false;
 
 	const save = (next: PlanState, ctx: ExtensionContext) => {
 		state = next;
@@ -222,8 +223,17 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand(REVIEW, {
 		description: "Review the proposed plan: approve, revise, or edit it",
 		handler: async (_args, ctx) => {
-			await ctx.waitForIdle();
-			await review(ctx);
+			if (reviewing) {
+				ctx.ui.notify("The plan review is already open.", "info");
+				return;
+			}
+			reviewing = true;
+			try {
+				await ctx.waitForIdle();
+				await review(ctx);
+			} finally {
+				reviewing = false;
+			}
 		},
 	});
 
