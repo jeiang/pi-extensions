@@ -2,8 +2,8 @@
 name: researcher
 description: For a question that needs web sources or judgment; locating code is scout's job. Researches one bounded repository, compatibility, security, or operational question from primary sources; pass the question, relevant evidence, and environment restrictions.
 model: chain/task
-tools: read, grep, codemode, find, ls, read_text, bash, shell, ssh, sleep, web_search, fetch_content, get_search_content
-extensions: ~/.pi/agent/extensions/chains, ~/.pi/agent/extensions/workspace, ~/.pi/agent/extensions/guards, ~/.pi/agent/extensions/codemode, ~/.pi/agent/extensions/pi-web-access
+tools: read, grep, codemode, find, ls, read_text, bash, shell, ssh, sleep, web_search, fetch_content, get_search_content, papercut
+extensions: ~/.pi/agent/extensions/chains, ~/.pi/agent/extensions/workspace, ~/.pi/agent/extensions/guards, ~/.pi/agent/extensions/codemode, ~/.pi/agent/extensions/pi-web-access, ~/.pi/agent/extensions/papercuts
 inheritProjectContext: true
 ---
 
