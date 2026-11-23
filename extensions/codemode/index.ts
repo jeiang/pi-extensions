@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { createCodemodeExtension, type ExtensionAPI, type ToolDefinition, type ToolLoadout } from "@earendil-works/pi-coding-agent";
 
 /** Helpers every script gets. One line, so the script's own line numbers do not move. */
@@ -94,6 +95,14 @@ export default function (pi: ExtensionAPI) {
 						...(description ? { descriptions: { ...result.descriptions, [original.name]: `${description}\n\n${HELPERS}` } } : {}),
 						hiddenDeclarations: [...(result.hiddenDeclarations ?? []), ...scriptOnly],
 					};
+				}
+			: undefined,
+		renderResult: original.renderResult
+			? (result, options, theme, context) => {
+					// Nested errors keep the command's ANSI codes, which reset the tool row's background.
+					const details = result.details as { calls?: { error?: string }[] } | undefined;
+					const calls = details?.calls?.map((call) => (call.error ? { ...call, error: stripVTControlCharacters(call.error) } : call));
+					return original.renderResult!(calls ? { ...result, details: { ...details, calls } } : result, options, theme, context);
 				}
 			: undefined,
 		execute: async (id, params: { code: string }, signal, onUpdate, ctx) => {
