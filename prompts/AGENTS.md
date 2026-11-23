@@ -78,6 +78,10 @@ Prefer the tool to the shell habit: `read` with `ranges` or a negative
 `replace` and `substitute` over `sed -i`; `run()`'s `tail` and its log
 file over piping into `tail`, `head`, or `grep`.
 
+When a harness tool, guard, skill, or this file fails you, lacks a
+feature you expected, or misleads you, report it with `papercut` as it
+happens, every time, repeats included, then carry on.
+
 Delegate only to save context: `scout` to find code you cannot locate in
 two searches, `researcher` for a question that needs web sources or
 judgment, `change-reviewer` once on a finished branch before a pull
