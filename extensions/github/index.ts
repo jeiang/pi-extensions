@@ -41,11 +41,20 @@ interface Details {
 }
 
 const params = Type.Object({
-	op: Type.Union([Type.Literal("run_watch"), Type.Literal("pr_view")], {
-		description: "run_watch: watch CI runs until they finish or a job fails; pr_view: a pull request's state and checks.",
+	op: Type.Union([Type.Literal("run_watch"), Type.Literal("pr_view"), Type.Literal("pr_create"), Type.Literal("pr_merge")], {
+		description:
+			"run_watch: watch CI runs until they finish or a job fails; pr_view: a pull request's state and checks; pr_create: open a pull request for the current branch, once pushed; pr_merge: merge one, now or with auto once checks pass.",
 	}),
-	run: Type.Optional(Type.String({ description: "run_watch: run id; default every run for the current HEAD commit." })),
-	pr: Type.Optional(Type.String({ description: "pr_view: number, URL, or branch; default the current branch's PR." })),
+	run: Type.Optional(Type.String({ description: "run_watch: run id; default every run for `ref`." })),
+	ref: Type.Optional(Type.String({ description: "run_watch: commit, branch, or other git revision whose runs to watch, such as origin/main after a merge; default HEAD." })),
+	pr: Type.Optional(Type.String({ description: "pr_view, pr_merge: number, URL, or branch; default the current branch's PR." })),
+	title: Type.Optional(Type.String({ description: "pr_create: title; without it, the first commit's subject and body." })),
+	body: Type.Optional(Type.String({ description: "pr_create: body." })),
+	base: Type.Optional(Type.String({ description: "pr_create: base branch; default the repository's default branch." })),
+	draft: Type.Optional(Type.Boolean({ description: "pr_create: open as a draft." })),
+	method: Type.Optional(Type.Union([Type.Literal("merge"), Type.Literal("squash"), Type.Literal("rebase")], { description: "pr_merge: required." })),
+	auto: Type.Optional(Type.Boolean({ description: "pr_merge: merge once required checks pass instead of now." })),
+	delete_branch: Type.Optional(Type.Boolean({ description: "pr_merge: delete the head branch after the merge." })),
 	cwd: Type.Optional(Type.String({ description: "Repository checkout to act on; an absolute path, or relative to the session directory. Default the session directory." })),
 });
 
@@ -158,33 +167,44 @@ export default function (pi: ExtensionAPI) {
 		name: "github",
 		label: "GitHub",
 		description:
-			"Watch GitHub Actions runs until they finish, failing fast with the failed job's log tail (run_watch), or show a pull request's state and checks (pr_view). If the user interrupts run_watch, it keeps watching in the background and wakes you with the outcome. Use `gh` through shell for everything else. Scripts get { op, pr?: { state, mergeable, checks: [{ name, status, conclusion }] }, conclusion?, runs?, failed_log? }.",
-		promptSnippet: "Watch CI runs (fail fast, failed log tail) and view PR state",
+			"Watch GitHub Actions runs for a commit until they finish, failing fast with the failed job's log tail (run_watch); show a pull request's state and checks (pr_view); open one (pr_create); merge one, now or with auto (pr_merge). Use instead of `gh pr checks --watch`, `gh run watch`, `gh pr view --json`, `gh pr create`, `gh pr merge`, and `gh api` commit status. If the user interrupts run_watch, it keeps watching in the background and wakes you with the outcome. Use `gh` through run() for everything else. Scripts get { op, pr?: { number, url, state, mergeable, mergedAt, checks: [{ name, status, conclusion }] }, conclusion?, runs?, failed_log? }.",
+		promptSnippet: "Watch CI runs (fail fast, failed log tail); view, open, and merge pull requests",
 		parameters: params,
 		outputSchema,
 		async execute(_id, input: Static<typeof params>, signal, onUpdate, ctx): Promise<AgentToolResult<Details> & { structuredContent: Output }> {
 			const cwd = resolve(sessionDir(ctx), input.cwd ?? ".");
 			// A missing cwd otherwise fails as a misleading "spawn gh ENOENT".
 			if (!existsSync(cwd)) throw new Error(`No directory ${cwd}`);
-			if (input.op === "pr_view") {
-				const pr = await gh<PrView>(cwd, [
-					"pr",
-					"view",
-					...(input.pr ? [input.pr] : []),
-					"--json",
-					"number,title,state,url,headRefName,mergeable,reviewDecision,mergedAt,statusCheckRollup",
-				]);
-				const { headRefName, statusCheckRollup: _rollup, ...rest } = pr;
+			const view = async (op: string, pr: string | undefined, note = "") => {
+				const found = await gh<PrView>(cwd, ["pr", "view", ...(pr ? [pr] : []), "--json", "number,title,state,url,headRefName,mergeable,reviewDecision,mergedAt,statusCheckRollup"]);
+				const { headRefName, statusCheckRollup: _rollup, ...rest } = found;
 				return {
-					content: [{ type: "text", text: JSON.stringify(pr, null, 2) }],
+					content: [{ type: "text" as const, text: `${note}${JSON.stringify(found, null, 2)}` }],
 					details: { runs: [] },
-					structuredContent: { op: "pr_view", pr: { ...rest, branch: headRefName, checks: checksOf(pr) } },
+					structuredContent: { op, pr: { ...rest, branch: headRefName, checks: checksOf(found) } },
 				};
+			};
+			if (input.op === "pr_view") return view("pr_view", input.pr);
+			if (input.op === "pr_create") {
+				const args = ["pr", "create", ...(input.title ? ["--title", input.title, "--body", input.body ?? ""] : ["--fill-first", ...(input.body !== undefined ? ["--body", input.body] : [])])];
+				if (input.base) args.push("--base", input.base);
+				if (input.draft) args.push("--draft");
+				const url = (await ghText(cwd, args)).trim().split("\n").at(-1) ?? "";
+				return view("pr_create", url);
+			}
+			if (input.op === "pr_merge") {
+				if (!input.method) throw new Error("pr_merge needs method: merge, squash, or rebase.");
+				const args = ["pr", "merge", ...(input.pr ? [input.pr] : []), `--${input.method}`];
+				if (input.auto) args.push("--auto");
+				if (input.delete_branch) args.push("--delete-branch");
+				// gh notes on stderr when it cannot delete a branch checked out in a worktree; the merge still happened.
+				const { stderr } = await run("gh", args, { cwd, maxBuffer: 32 * 1024 * 1024 });
+				return view("pr_merge", input.pr, stderr.trim() ? `${stderr.trim()}\n` : "");
 			}
 			let ids: string[];
 			if (input.run) ids = [input.run];
 			else {
-				const sha = (await run("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim();
+				const sha = (await run("git", ["rev-parse", input.ref ?? "HEAD"], { cwd })).stdout.trim();
 				const listed = await gh<{ databaseId: number }[]>(cwd, ["run", "list", "--commit", sha, "--json", "databaseId"]);
 				ids = listed.map((r) => String(r.databaseId));
 				if (ids.length === 0) return { content: [{ type: "text", text: `No runs for ${sha} yet.` }], details: { runs: [] }, structuredContent: { op: "run_watch", conclusion: "none", runs: [] } };

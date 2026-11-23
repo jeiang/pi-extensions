@@ -113,7 +113,8 @@ rasterize a diagram to show it.
 
 # Environment
 
-zakkart is macOS with nix-darwin; artemis and the servers are NixOS. The
-login shell is fish: wrap POSIX constructs run over ssh in `bash -c '...'`.
+zakkart is macOS with nix-darwin; artemis and the servers are NixOS. Run
+remote commands with `tools.ssh`: it runs them under bash, though the login
+shell is fish, and shares one connection per host.
 Ad hoc tools come from `nix shell` or `nix run`; add a tool a repository
 reuses to its devshell.
