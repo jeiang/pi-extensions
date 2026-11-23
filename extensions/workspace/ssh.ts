@@ -11,8 +11,10 @@ const exec = promisify(execFile);
 const DEFAULT_OPTIONS: Record<string, string> = { BatchMode: "yes", ConnectTimeout: "10" };
 /** The tool owns connection sharing; a caller's value would break it. */
 const OWNED = new Set(["controlmaster", "controlpath", "controlpersist"]);
+/** They run local programs or load local code, out of the guards' sight, or replace the command. */
+const REFUSED = new Set(["proxycommand", "localcommand", "permitlocalcommand", "knownhostscommand", "remotecommand", "pkcs11provider", "securitykeyprovider"]);
 const HOST = /^[A-Za-z0-9_.@:[\]-]+$/;
-const OPTION = /^[A-Za-z]+$/;
+const OPTION = /^[A-Za-z][A-Za-z0-9]*$/;
 
 const params = Type.Object({
 	host: Type.String({ description: "Host, user@host, or a Host alias from ~/.ssh/config." }),
@@ -46,6 +48,7 @@ export function sshOptions(options: Params["options"] = {}): string[] {
 	for (const [key, value] of Object.entries(options)) {
 		if (!OPTION.test(key)) throw new Error(`Not an ssh option name: ${key}`);
 		if (OWNED.has(key.toLowerCase())) throw new Error(`${key} is managed by the ssh tool.`);
+		if (REFUSED.has(key.toLowerCase())) throw new Error(`${key} runs local programs or replaces the command; use ProxyJump, or run() for local work.`);
 		merged[key] = typeof value === "boolean" ? (value ? "yes" : "no") : String(value);
 	}
 	return Object.entries(merged).flatMap(([key, value]) => ["-o", `${key}=${value}`]);
