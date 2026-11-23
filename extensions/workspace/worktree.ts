@@ -152,21 +152,21 @@ export async function removeWorktree(root: string, path: string, force: boolean)
 	return undefined;
 }
 
-/** True when `tip` has commits off `base`'s first-parent line and merging it into one of those commits would change nothing. */
+/** True when `tip` has commits off `base`'s first-parent line and one of those commits holds every file the branch changed as `tip` has it. */
 async function mergedInto(root: string, base: string, mainline: Set<string>, tip: string): Promise<boolean> {
 	if (mainline.has(tip)) return false;
 	if ((await tryGit(root, "merge-base", "--is-ancestor", tip, base)) !== undefined) return true;
-	// A squash or rebase merge leaves the tip off base. Later edits on base can make a merge into its tip conflict,
-	// so try each first-parent commit since the fork that touched the branch's files; the squash commit is one.
-	// Later commits that change no content pass too, so prune reports each removed tip.
+	// A squash or rebase merge leaves the tip off base; the squash commit holds the branch's files as the tip has them.
+	// A merge test would miss a later commit that reverts part of the branch, and later edits on base would hide the squash.
+	// Commits after the squash that change no content pass too, so prune reports each removed tip.
 	const fork = await tryGit(root, "merge-base", base, tip);
 	if (!fork) return false;
-	const files = (await git(root, "diff", "--name-only", "--no-renames", fork, tip)).split("\n").filter(Boolean);
+	// Every file a branch commit touched, so a file the branch added and later deleted still counts.
+	const files = [...new Set((await git(root, "log", "--name-only", "--no-renames", "--format=", `${fork}..${tip}`)).split("\n").filter(Boolean))];
 	if (files.length === 0) return false;
 	const candidates = (await git(root, "rev-list", "--first-parent", `${fork}..${base}`, "--", ...files)).split("\n").filter(Boolean);
 	for (const commit of candidates) {
-		const merge = await tryGit(root, "merge-tree", "--write-tree", commit, tip);
-		if (merge !== undefined && merge.split("\n")[0] === (await git(root, "rev-parse", `${commit}^{tree}`))) return true;
+		if ((await tryGit(root, "diff", "--quiet", commit, tip, "--", ...files)) !== undefined) return true;
 	}
 	return false;
 }
