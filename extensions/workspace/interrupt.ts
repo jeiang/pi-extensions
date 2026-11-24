@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // pi loads each extension separately, so module-level state would not be shared between them.
-const KEY = Symbol.for("pi-extensions.workspace.interrupt");
+const KEY = Symbol.for("pi-extensions.workspace.interrupt.v2");
 type Calls = { running: Map<() => void, string>; background: Set<string> };
 const store = globalThis as typeof globalThis & { [KEY]?: Calls };
 const calls = (store[KEY] ??= { running: new Map(), background: new Set() });
