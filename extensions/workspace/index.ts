@@ -142,7 +142,6 @@ export default function (pi: ExtensionAPI) {
 	const bashTemplate = createBashToolDefinition(sessionCwd);
 	pi.registerTool({
 		...bashTemplate,
-		description: `${bashTemplate.description} If the user interrupts, the call rejects with the job id, which ends the script unless it catches the error, and the command keeps running as a shell job.`,
 		exposure: "codemode",
 		parameters: Type.Object({
 			...bashTemplate.parameters.properties,
@@ -157,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "sleep",
 		label: "Sleep",
-		description: "Wait up to 300 seconds, for polling loops in scripts, which have no timers. An interrupt ends the wait early.",
+		description: "Wait up to 300 seconds, for polling loops in scripts, which have no timers.",
 		parameters: Type.Object({ seconds: Type.Number({ description: "Seconds to wait, at most 300." }) }),
 		exposure: "codemode",
 		async execute(_id, input: { seconds: number }, signal) {

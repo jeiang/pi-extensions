@@ -202,7 +202,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		promptSnippet: `Delegate to a read-only child agent (${agents.map((agent) => agent.name).join(", ")})`,
 		parameters: params,
 		outputSchema,
-		async execute(_id, input: Static<typeof params>, signal, onUpdate, ctx) {
+		async execute(id, input: Static<typeof params>, signal, onUpdate, ctx) {
 			const agent = agents.find((candidate) => candidate.name === input.agent);
 			if (!agent) throw new Error(`No agent "${input.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
 			const sessionFile = ctx.sessionManager.getSessionFile();
@@ -219,7 +219,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 				report(run(agent, input.task, sessionDir, undefined));
 				return text(`Launched ${agent.name} in the background; you are woken with its result or its failure.`, agent.name, "background");
 			}
-			const outcome = await untilInterrupt(signal, (childSignal, attached) =>
+			const outcome = await untilInterrupt(id, signal, (childSignal, attached) =>
 				run(agent, input.task, sessionDir, childSignal, (line) => {
 					if (attached()) onUpdate?.({ content: [{ type: "text", text: line }], details: undefined });
 				}),
