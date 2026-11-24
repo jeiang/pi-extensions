@@ -171,7 +171,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Watch CI runs (fail fast, failed log tail); view, open, and merge pull requests",
 		parameters: params,
 		outputSchema,
-		async execute(_id, input: Static<typeof params>, signal, onUpdate, ctx): Promise<AgentToolResult<Details> & { structuredContent: Output }> {
+		async execute(id, input: Static<typeof params>, signal, onUpdate, ctx): Promise<AgentToolResult<Details> & { structuredContent: Output }> {
 			const cwd = resolve(sessionDir(ctx), input.cwd ?? ".");
 			// A missing cwd otherwise fails as a misleading "spawn gh ENOENT".
 			if (!existsSync(cwd)) throw new Error(`No directory ${cwd}`);
@@ -233,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 				const structuredContent: Output = { op: "run_watch", conclusion, runs: runsOf(runs), ...(failedLog ? { failed_log: failedLog } : {}) };
 				return { content: [{ type: "text", text }], details: { runs }, isError: Boolean(failure), structuredContent };
 			};
-			const outcome = await untilInterrupt(signal, (own, attached) => watch(AbortSignal.any([own, shutdown.signal]), attached));
+			const outcome = await untilInterrupt(id, signal, (own, attached) => watch(AbortSignal.any([own, shutdown.signal]), attached));
 			if ("value" in outcome) return outcome.value;
 			const wake = (content: string, error: boolean) =>
 				pi.sendMessage({ customType: "github", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });

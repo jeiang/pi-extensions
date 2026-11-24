@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import { createCodemodeExtension, type ExtensionAPI, type ToolDefinition, type ToolLoadout } from "@earendil-works/pi-coding-agent";
+import { inBackground, registerInterrupt, untilInterrupt } from "../workspace/interrupt.ts";
 
 /** Helpers every script gets. One line, so the script's own line numbers do not move. */
 export const PRELUDE = [
@@ -18,7 +19,7 @@ const HELPERS = `Helpers defined in every script:
 - settle(promises) → each value, or "Error: …" for a rejection. mapLimit(items, n, fn) runs fn at most n at a time.
 - sleep(s); poll(fn, { every = 15, timeout = 600 }) → the first truthy fn() result.
 - job(cmd, { wait_on, wait_seconds }) → a background shell job { job, status, log }; tools.shell({ action: "wait", job, wait_on }) waits on it. You are woken when it exits.
-A first line \`// @background\` runs the whole script in the background: the call returns at once and you are woken with its output. It holds one of two script workers until it ends, so give it a timeout_ms on a second \`// @options\` line.
+A first line \`// @background\` runs the whole script in the background: the call returns at once and you are woken with its output. It holds one of two script workers until it ends, so give it a timeout_ms on a second \`// @options\` line. If the user interrupts a script, it moves to the background the same way.
 
 The script is the program; a command runs one external program:
 - One program per run(). Independent commands go in separate calls under settle(), so each keeps its own exit code and output and one failure does not hide the rest.
@@ -107,18 +108,33 @@ export default function (pi: ExtensionAPI) {
 			: undefined,
 		execute: async (id, params: { code: string }, signal, onUpdate, ctx) => {
 			const background = /^\/\/ @background[^\n]*\n/.exec(params.code);
-			if (!background) return original.execute(id, { ...params, code: withPrelude(params.code) }, signal, onUpdate, ctx);
-			const code = withPrelude(params.code.slice(background[0].length));
 			const wake = (content: string, error: boolean) =>
 				pi.sendMessage({ customType: "codemode-background", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
+			const report = (script: ReturnType<typeof original.execute>) =>
+				void script.then(
+					(result) => wake(`Background script ${id} finished:\n${result.content.map((part) => (part.type === "text" ? part.text : "")).join("")}`, Boolean(result.isError)),
+					(error: Error) => wake(`Background script ${id} failed: ${error.message}`, true),
+				);
+			if (!background) {
+				const code = withPrelude(params.code);
+				// A script moved to the background outlives its tool call, so only session shutdown cancels it then.
+				const outcome = await untilInterrupt(id, signal, (own, attached) =>
+					original.execute(id, { code }, AbortSignal.any([own, shutdown.signal]), (update) => {
+						if (attached()) onUpdate?.(update);
+					}, ctx),
+				);
+				if ("value" in outcome) return outcome.value;
+				report(outcome.background);
+				return { content: [{ type: "text", text: `The user interrupted; script ${id} moved to the background and you are woken with its result.` }], details: undefined };
+			}
 			// A background script outlives its tool call, so only session shutdown cancels it.
-			void original.execute(id, { code }, shutdown.signal, undefined, ctx).then(
-				(result) => wake(`Background script ${id} finished:\n${result.content.map((part) => (part.type === "text" ? part.text : "")).join("")}`, Boolean(result.isError)),
-				(error: Error) => wake(`Background script ${id} failed: ${error.message}`, true),
-			);
+			const script = original.execute(id, { code: withPrelude(params.code.slice(background[0].length)) }, shutdown.signal, undefined, ctx);
+			inBackground(id, script);
+			report(script);
 			return { content: [{ type: "text", text: `Started script ${id} in the background; you are woken with its result.` }], details: undefined };
 		},
 	});
 	const shutdown = new AbortController();
 	pi.on("session_shutdown", () => shutdown.abort());
+	registerInterrupt(pi);
 }
