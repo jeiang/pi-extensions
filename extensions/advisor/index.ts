@@ -12,6 +12,8 @@ export interface AdvisorConfig {
 	/** `provider/model:level` targets tried in order until one answers. */
 	models: string[];
 	timeoutMs?: number;
+	/** Whether the advisor reviews runs before `/advisor on` or a saved session state says otherwise. Defaults to off. */
+	enabled?: boolean;
 	/** Extra review rules appended to the advisor's instructions. */
 	rubric?: string;
 }
@@ -116,7 +118,8 @@ export function createAdvisor(config: AdvisorConfig) {
 
 	return (pi: ExtensionAPI) => {
 		let targets = config.models.map(parseTarget);
-		let enabled = true;
+		const enabledByDefault = config.enabled ?? false;
+		let enabled = enabledByDefault;
 		let available: Model<Api>[] = [];
 		let history: Message[] = [];
 		// What `history` already covers; a mismatch (compaction, branch change, new prompt, restart) starts it over.
@@ -140,7 +143,7 @@ export function createAdvisor(config: AdvisorConfig) {
 				.filter((entry) => entry.type === "custom" && entry.customType === STATE)
 				.at(-1);
 			const state = saved?.type === "custom" ? (saved.data as AdvisorState | undefined) : undefined;
-			enabled = state?.enabled ?? true;
+			enabled = state?.enabled ?? enabledByDefault;
 			targets = (state?.models ?? config.models).map(parseTarget);
 			setToolActive();
 			setReviewer(ctx, (ctx, request, signal) => {
