@@ -26,7 +26,7 @@ async function run(advice: string, acts = true) {
 				return acts && index === 0 ? { tool: "edit", args: {} } : { text: "main answer" };
 			}, calls),
 			editTool,
-			createAdvisor({ models: ["p2/m:low"] }),
+			createAdvisor({ models: ["p2/m:low"], enabled: true }),
 		],
 		model: ["p1", "m"],
 	});
