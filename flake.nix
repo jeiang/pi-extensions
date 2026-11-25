@@ -65,6 +65,10 @@ async function viaDevshell(command, args, options) {
   return spawnDirect("pi-devshell-exec", [command, ...args], options);
 }
 async function spawnDirect(command, args, options) {'
+          # A request budget can expire after the server closed its stream, as it does on shutdown; sending
+          # $/cancelRequest then makes vscode-jsonrpc log "Connection is closed.", so skip the cancel once closing.
+          substituteInPlace $out/node_modules/@ian-pascoe/pi-lsp/src/lsp-server-client.ts \
+            --replace-fail '() => cancellation.cancel(),' '() => { if (!this.closing && !this.closed && this.terminalError === undefined) cancellation.cancel(); },'
           runHook postInstall
         '';
       };
