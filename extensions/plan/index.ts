@@ -290,6 +290,17 @@ export default function (pi: ExtensionAPI) {
 		pi.sendUserMessage(`/${REVIEW}`, { expandPromptTemplates: true });
 	});
 
+	// pi appends state per branch, so a branch switch must re-read it; the handoff applies only to a new session.
+	const restore = (_event: unknown, ctx: ExtensionContext) => {
+		const entry = ctx.sessionManager
+			.getBranch()
+			.filter((e) => e.type === "custom" && e.customType === ENTRY)
+			.pop() as { data?: PlanState } | undefined;
+		state = entry?.data ?? { enabled: false };
+		setPropose(state.enabled);
+		ctx.ui.setStatus(ENTRY, state.enabled ? "plan" : undefined);
+	};
+
 	pi.on("session_start", async (event, ctx) => {
 		const handoff = handoffSlot[HANDOFF];
 		delete handoffSlot[HANDOFF];
@@ -298,12 +309,7 @@ export default function (pi: ExtensionAPI) {
 			if (!model || !(await pi.setModel(model))) ctx.ui.notify(`Could not switch to ${handoff.provider}/${handoff.id}`, "error");
 			pi.setThinkingLevel(handoff.thinkingLevel);
 		}
-		const entry = ctx.sessionManager
-			.getBranch()
-			.filter((e) => e.type === "custom" && e.customType === ENTRY)
-			.pop() as { data?: PlanState } | undefined;
-		state = entry?.data ?? { enabled: false };
-		setPropose(state.enabled);
-		ctx.ui.setStatus(ENTRY, state.enabled ? "plan" : undefined);
+		restore(event, ctx);
 	});
+	pi.on("session_tree", restore);
 }
