@@ -6,6 +6,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { LEVELS, parseTarget } from "../chains/index.ts";
 import { addUsage } from "../footer/cost.ts";
+import { effectsOf } from "../workspace/effects.ts";
 import { setReviewer } from "./review.ts";
 
 export interface AdvisorConfig {
@@ -21,8 +22,6 @@ export interface AdvisorConfig {
 const LGTM = /^\s*LGTM\b/i;
 const MAX_NITS = 2;
 const COLLAPSED_LINES = 3;
-// A run that only answered a question needs no second model.
-const ACTING_TOOLS: Record<string, true> = { edit: true, write: true, replace: true, substitute: true, shell: true, codemode: true, subagent: true };
 const POINT = /^[\s>*\-\d.)]*[`*]*(blocker|concern|nit)[`*]*\s*[:.]/i;
 
 const INSTRUCTIONS = `You review a coding agent's finished run on behalf of its user. You see the agent's instructions and transcript, quoted, and cannot act. Silence is the default: answer \`LGTM\` alone when the agent is on track. When the agent asks you a question directly, answer the question instead.
@@ -239,8 +238,9 @@ export function createAdvisor(config: AdvisorConfig) {
 			proposed = false;
 		});
 
-		pi.on("tool_call", (event) => {
-			if (ACTING_TOOLS[event.toolName]) acted = true;
+		pi.on("tool_call", (event, ctx) => {
+			// A run that only answered a question needs no second model.
+			if (effectsOf(event.toolName, event.input as Record<string, unknown>, ctx.cwd).kind !== "read") acted = true;
 			if (event.toolName === "propose") proposed = true;
 		});
 
