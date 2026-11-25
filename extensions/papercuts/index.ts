@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { maskSecrets } from "../guards/index.ts";
 import { type Static, Type } from "typebox";
 
 const params = Type.Object({
@@ -30,7 +31,8 @@ export default function (pi: ExtensionAPI) {
 				time: new Date().toISOString(),
 				kind: input.kind,
 				tool: input.tool,
-				text: input.text,
+				// A report meant to name a secret by location can still quote it; the file outlives the session.
+				text: maskSecrets(input.text),
 				model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`,
 				cwd: ctx.cwd,
 				session: ctx.sessionManager.getSessionFile(),
