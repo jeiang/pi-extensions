@@ -102,6 +102,8 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	let next = 1;
 	const waiting: (() => void)[] = [];
 	const children = new Map<string, Child>();
+	// A child queued behind the limit must not spawn into a session that is closing.
+	let closed = false;
 
 	const acquire = async () => {
 		while (active >= limit) {
@@ -109,6 +111,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			waiting.push(resolve);
 			await promise;
 		}
+		if (closed) throw new Error("The session is shutting down.");
 		active++;
 	};
 	const release = () => {
@@ -188,6 +191,9 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	};
 
 	pi.on("session_shutdown", () => {
+		closed = true;
+		// The waiters wake, see `closed`, and stop instead of taking a freed slot.
+		for (const resume of waiting.splice(0)) resume();
 		for (const child of children.values()) child.kill();
 	});
 
@@ -243,8 +249,10 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 					(done) => wake(done.failed ? `Subagent (session ${session}) ${done.text}` : `Subagent ${agent.name} finished (session ${session}):\n${done.text}`, done.failed, done.usage),
 					(error: Error) => wake(`Subagent ${agent.name} failed (session ${session}): ${error.message}`, true, undefined),
 				);
-			const wake = (content: string, error: boolean, usage: Usage | undefined) =>
+			const wake = (content: string, error: boolean, usage: Usage | undefined) => {
+				if (closed) return;
 				pi.sendMessage({ customType: "subagent", content, display: true, details: { error, usage } }, { triggerTurn: true, deliverAs: "steer" });
+			};
 			if (input.background) {
 				// A background child outlives the tool call, so the call's signal does not cancel it.
 				report(run(agent, task, sessionDir, session, undefined));
