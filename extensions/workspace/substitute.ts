@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import { type Static, Type } from "typebox";
+import { withFileLocks } from "./mutation.ts";
 
 const run = promisify(execFile);
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -166,10 +167,20 @@ export function substituteTool(store: EditStore, refuse: (absolute: string, inpu
 					const reason = refuse(change.absolute, input);
 					if (reason) throw new Error(`${change.path}: ${reason}`);
 				}
-				for (const change of changes) {
-					await writeFile(change.absolute, change.after);
-					store.recordSnapshot(change.absolute, change.after.replace(/\r\n?/g, "\n"), []);
-				}
+				// The lock covers the freshness check and the write, so a concurrent edit of these files is caught or ordered, never lost.
+				await withFileLocks(
+					changes.map((change) => change.absolute),
+					async () => {
+						for (const change of changes) {
+							const now = await readFile(change.absolute, "utf8").catch(() => "");
+							if (now !== change.before) throw new Error(`${change.path} changed since the preview; preview again.`);
+						}
+						for (const change of changes) {
+							await writeFile(change.absolute, change.after);
+							store.recordSnapshot(change.absolute, change.after.replace(/\r\n?/g, "\n"), []);
+						}
+					},
+				);
 				output.applied = true;
 			}
 			return { content: [{ type: "text", text: render(output) }], details: undefined, structuredContent: output };

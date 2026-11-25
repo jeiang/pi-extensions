@@ -6,7 +6,7 @@ import { inBackground, registerInterrupt, untilInterrupt } from "../workspace/in
 export const PRELUDE = [
 	"const run = (command, o = {}) => tools.bash({ command, ...o });",
 	"const sh = async (command, { check = true, ...o } = {}) => { const r = await run(command, o); if (check && r.exit_code !== 0) throw new Error(`exit ${r.exit_code}: ${command}\\n${r.output.slice(-2000)}\\nlog: ${r.log}`); return r.output; };",
-	"const json = async (command, o) => { const out = await sh(command, o); try { return JSON.parse(out); } catch { throw new Error(`not JSON from ${command}: ${out.slice(0, 500)}`); } };",
+	"const json = async (command, o) => { const out = await sh(command, o); const at = Math.min(...[out.indexOf('{'), out.indexOf('[')].filter((n) => n >= 0)); for (const text of [out, out.slice(at)]) { try { return JSON.parse(text); } catch {} } throw new Error(`no JSON in the output of ${command}:\n${out.slice(0, 500)}`); };",
 	"const settle = async (list) => (await Promise.allSettled(list)).map((x) => (x.status === 'fulfilled' ? x.value : `Error: ${x.reason?.message ?? x.reason}`));",
 	"const sleep = (seconds) => tools.sleep({ seconds });",
 	"const poll = async (fn, { every = 15, timeout = 600 } = {}) => { const end = Date.now() + timeout * 1000; for (;;) { const v = await fn(); if (v) return v; if (Date.now() + every * 1000 > end) throw new Error(`poll timed out after ${timeout}s`); await sleep(every); } };",
@@ -24,7 +24,7 @@ A first line \`// @background\` runs the whole script in the background: the cal
 The script is the program; a command runs one external program:
 - One program per run(). Independent commands go in separate calls under settle(), so each keeps its own exit code and output and one failure does not hide the rest.
 - Filter, count, sort, and join in JS, not with \`;\` chains or pipes into head, tail, grep, sort, awk, or jq. Prefer a command's --json output with json().
-- Keep intermediate results in variables, or in store()/load() across scripts, not in /tmp files.
+- Keep intermediate results in variables, or in store()/load() across scripts, not in /tmp files. One stored value holds at most 256 KiB of JSON.
 - Structured tools: tools.ls → { entries }, tools.find → { paths }, tools.grep → { lines, files }, tools.read_text → { text, lines }, tools.ssh → like run() on a remote host.
 - Declared tools work here too. Use tools.github and tools.nix instead of the gh and nix commands they cover; worktree is a direct call only.
 - Return only what you need to see.

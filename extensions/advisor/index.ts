@@ -224,7 +224,8 @@ export function createAdvisor(config: AdvisorConfig) {
 					.result();
 				usage = addUsage(usage, result.usage);
 				if (combined.aborted) return { usage };
-				if (result.stopReason === "error") continue;
+				// An empty answer is no answer: counting it as one would report a clean review of a plan nobody read.
+				if (result.stopReason === "error" || !answerText(result).trim()) continue;
 				history = [...history, user, result];
 				seen = { prompt, count: context.length, last: context.at(-1)?.timestamp };
 				return { answer: answerText(result), usage };

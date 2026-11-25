@@ -33,6 +33,38 @@
           substituteInPlace $out/node_modules/pi-lens/dist/index.js \
             --replace-fail 'const targetIgnored = isPathIgnoredByProject(' 'const targetIgnored = !filePath.includes("/.worktrees/") && isPathIgnoredByProject(' \
             --replace-fail 'if (isPathIgnoredByProject(filePath, deps._ownerRoot ?? workspaceRoot, false)) {' 'if (!filePath.includes("/.worktrees/") && isPathIgnoredByProject(filePath, deps._ownerRoot ?? workspaceRoot, false)) {'
+          # pi-web-access reads any `data:` as an inline data URI, so Rust source like `data: &[u8]`
+          # became an omission marker; a comma-less token that holds whitespace is code, not a URI.
+          substituteInPlace $out/node_modules/pi-web-access/dist/index.js \
+            --replace-fail 'if (missingComma && end === headerStart && candidate.enclosure === null) {' 'if (missingComma && (end === headerStart ? candidate.enclosure === null : /[ \t]/.test(text7.slice(headerStart, end)))) {'
+          # Readability's _grabArticle dereferences topCandidate.parentNode, which is null for a candidate
+          # the cleaning steps detached; the parse then threw instead of returning the article. Fall back to body.
+          substituteInPlace $out/node_modules/@mozilla/readability/Readability.js \
+            --replace-fail '        parentOfTopCandidate = topCandidate.parentNode;
+        while (' '        parentOfTopCandidate = topCandidate.parentNode || doc.body;
+        while (' \
+            --replace-fail '      parentOfTopCandidate = topCandidate.parentNode;
+      var siblings = parentOfTopCandidate.children;' '      parentOfTopCandidate = topCandidate.parentNode || doc.body;
+      var siblings = parentOfTopCandidate.children;'
+          # pi-lens spawns its linters with pi's PATH, which lacks the project devshell: cargo, go, and
+          # dotnet look missing there. A command that is not on PATH is retried through pi-devshell-exec,
+          # the wrapper pi-lsp already starts servers with, and the result replaces a failed probe.
+          substituteInPlace $out/node_modules/pi-lens/dist/index.js \
+            --replace-fail 'async function safeSpawnAsync(command, args, options) {' 'async function safeSpawnAsync(command, args, options) {
+  if (safeSpawnAsync.wrapped?.has(command)) return viaDevshell(command, args, options);
+  const direct = await spawnDirect(command, args, options);
+  if (command === "pi-devshell-exec" || direct.status !== null || direct.error?.code !== "ENOENT") return direct;
+  const wrapper = safeSpawnAsync.wrapper ??= (await spawnDirect("sh", ["-c", "command -v pi-devshell-exec"], { timeout: 5e3 })).status === 0;
+  if (!wrapper) return direct;
+  const viaWrapper = await viaDevshell(command, args, options);
+  if (viaWrapper.status === 127 || /command not found/.test(viaWrapper.stderr ?? "")) return direct;
+  (safeSpawnAsync.wrapped ??= new Set()).add(command);
+  return viaWrapper;
+}
+async function viaDevshell(command, args, options) {
+  return spawnDirect("pi-devshell-exec", [command, ...args], options);
+}
+async function spawnDirect(command, args, options) {'
           runHook postInstall
         '';
       };
@@ -43,7 +75,7 @@
     });
 
     devShells = forAllSystems (pkgs: {
-      default = pkgs.mkShell {packages = [pkgs.nodejs_24 pkgs.bun];};
+      default = pkgs.mkShell {packages = [pkgs.nodejs_24 pkgs.bun pkgs.ripgrep];};
     });
   };
 }

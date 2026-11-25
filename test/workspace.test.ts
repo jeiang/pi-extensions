@@ -5,8 +5,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { grepRoute, progressBar } from "../extensions/workspace/shell.ts";
-import { childArgs, loadAgents } from "../extensions/workspace/subagent.ts";
+import { grepRoute, lastLines, progressBar } from "../extensions/workspace/shell.ts";
+import { childArgs, loadAgents, sessionExists } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -221,6 +221,11 @@ test("a background job returns at the first matching line and keeps running", as
 	assert.ok(Date.now() - started < 4000);
 });
 
+test("tail reports truncated only when it left output out", () => {
+	assert.deepEqual(lastLines("a\nb\nc\n", 20), { content: "a\nb\nc", truncated: false });
+	assert.deepEqual(lastLines("a\nb\nc\n", 2), { content: "b\nc", truncated: true });
+});
+
 test("grepRoute serves plain rg and grep calls only", () => {
 	assert.deepEqual(grepRoute("rg -i 'foo bar' src"), { ignoreCase: true, pattern: "foo bar", path: "src" });
 	assert.deepEqual(grepRoute("grep -rn TODO ."), { pattern: "TODO", path: "." });
@@ -257,6 +262,17 @@ test("subagent arguments keep the child to its agent's model, tools, and extensi
 	]);
 	// An agent without a tool list must still not get the subagent tool.
 	assert.deepEqual(childArgs(plain, "t", undefined), ["--mode", "json", "-p", "--exclude-tools", "subagent", "-ne", "--no-session", "--", "t"]);
+	// A session id reopens that transcript, which is what resuming a stopped child needs.
+	assert.deepEqual(childArgs(scout, "go on", "/s", "0190-abc").slice(-4), ["--session-id", "0190-abc", "--", "go on"]);
+});
+
+test("a child session is found by the id pi put in its transcript's name", () => {
+	const dir = mkdtempSync(join(tmpdir(), "ws-sessions-"));
+	assert.equal(sessionExists(dir, "0190-abc"), false);
+	writeFileSync(join(dir, "2026-01-01T00-00-00-000Z_0190-abc.jsonl"), "");
+	assert.equal(sessionExists(dir, "0190-abc"), true);
+	assert.equal(sessionExists(dir, "0190-ab"), false);
+	assert.equal(sessionExists(join(dir, "absent"), "0190-abc"), false);
 });
 
 test("progressBar reads build steps and percentages", () => {

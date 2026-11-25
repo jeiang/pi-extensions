@@ -20,6 +20,7 @@ import {
 	hashlineFormatHeader,
 	hashlineFormatNumberedLines,
 } from "@oh-my-pi/pi-natives";
+import { withFileLocks } from "./mutation.ts";
 import { type Static, Type } from "typebox";
 
 const IMAGE = /^\.(png|jpe?g|gif|webp|bmp|svg)$/i;
@@ -121,10 +122,17 @@ const replaceParams = Type.Object({
 	replace_all: Type.Optional(Type.Boolean({ description: "Replace every occurrence instead of requiring exactly one." })),
 });
 
-type EditDetails = { diff: string; firstChangedLine?: number };
-
+/** The files a patch writes, resolved against `cwd`: the ones it names, a rename's destination, or a replace's one path. */
+export function patchTargets(cwd: string, mode: "hashline" | "replace", input: Record<string, unknown>): string[] {
+	if (mode === "replace") return [String(input.path ?? "")].filter(Boolean).map((path) => resolve(cwd, path.replace(/^@/, "")));
+	const patch = String(input.input ?? "");
+	const paths = [...patch.matchAll(/\[([^\]#\n]+)#/g)].map((match) => match[1] ?? "");
+	// A rename writes a file no header names; the destination must be locked with the rest.
+	for (const match of patch.matchAll(/^MV\s+(.+)$/gm)) paths.push((match[1] ?? "").replace(/^"(.*)"$/, "$1"));
+	return paths.filter(Boolean).map((path) => resolve(cwd, path.replace(/^@/, "")));
+}
 /** Runs one native edit session; matching is always exact. */
-async function applyEdit(store: EditStore, cwd: string, mode: "hashline" | "replace", input: Record<string, unknown>) {
+async function applyEditNow(store: EditStore, cwd: string, mode: "hashline" | "replace", input: Record<string, unknown>) {
 	const session = new EditSession(store, {
 		cwd,
 		mode,
@@ -162,6 +170,14 @@ async function applyEdit(store: EditStore, cwd: string, mode: "hashline" | "repl
 	} finally {
 		session.close();
 	}
+}
+type EditDetails = { diff: string; firstChangedLine?: number };
+
+/** Serialized on the files it names, so two calls on one file cannot interleave their read and write. */
+async function applyEdit(store: EditStore, cwd: string, mode: "hashline" | "replace", input: Record<string, unknown>) {
+	const work = () => applyEditNow(store, cwd, mode, input);
+	const targets = patchTargets(cwd, mode, input);
+	return targets.length > 0 ? withFileLocks(targets, work) : work();
 }
 
 export function hashlineTools(store: EditStore) {

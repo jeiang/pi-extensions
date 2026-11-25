@@ -61,6 +61,12 @@ const params = Type.Object({
 	job: Type.Optional(Type.String({ description: "Job id for read, wait, kill." })),
 });
 
+/** The last `lines` lines of `output`, and whether that left anything out. */
+export function lastLines(output: string, lines: number) {
+	const rows = output.replace(/\n$/, "").split("\n");
+	const shown = rows.slice(-Math.max(1, Math.floor(lines)));
+	return { content: shown.join("\n"), truncated: shown.length < rows.length };
+}
 type Params = Static<typeof params>;
 
 export const shellOutputSchema = Type.Object({
@@ -183,10 +189,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return dir;
 	};
 	/** The last `lines` lines of `output`, or pi's default tail truncation. */
-	const view = (output: string, lines?: number) => {
-		if (lines === undefined) return truncateTail(output).content;
-		return output.replace(/\n$/, "").split("\n").slice(-Math.max(1, Math.floor(lines))).join("\n");
-	};
+	const view = (output: string, lines?: number) => (lines === undefined ? truncateTail(output).content : lastLines(output, lines).content);
 	const shape = (job: Job, output: string): ShellResult => ({
 		job: job.id,
 		status: job.status,
@@ -355,11 +358,13 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		}
 		const result = finished(job, input.tail);
 		if (job.status !== "exited" || job.exitCode == null) throw new Error(result.content[0]?.text);
-		const full = input.tail === undefined ? truncateTail(readLog(job), { maxBytes: STRUCTURED_MAX_BYTES, maxLines: Number.MAX_SAFE_INTEGER }) : { content: result.structuredContent.output, truncated: true };
+		const log = readLog(job);
+		// `tail` is the agent's own cut; truncated says whether this output left out any of the log.
+		const shown = input.tail === undefined ? truncateTail(log, { maxBytes: STRUCTURED_MAX_BYTES, maxLines: Number.MAX_SAFE_INTEGER }) : lastLines(log, input.tail);
 		const structuredContent = {
-			output: full.content,
-			truncated: full.truncated,
-			...(full.truncated ? { full_output_path: job.log } : {}),
+			output: shown.content,
+			truncated: shown.truncated,
+			...(shown.truncated ? { full_output_path: job.log } : {}),
 			log: job.log,
 			exit_code: job.exitCode,
 			wall_time_seconds: Math.round(((job.ended ?? Date.now()) - job.started) / 100) / 10,

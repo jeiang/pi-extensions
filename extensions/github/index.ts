@@ -130,7 +130,10 @@ async function ghText(cwd: string, args: string[]): Promise<string> {
 
 const RUN_FIELDS = "databaseId,name,workflowName,status,conclusion,url,jobs";
 
-const failed = (step: { conclusion: string | null }) => step.conclusion === "failure" || step.conclusion === "timed_out" || step.conclusion === "cancelled";
+/** The conclusions that count as done: anything else a completed run or step reports, such as startup_failure or action_required, failed. */
+const SUCCEEDED = new Set(["success", "neutral", "skipped"]);
+/** gh gives an unfinished run or step an empty conclusion and a finished one its verdict. */
+const failed = (step: { conclusion: string | null }) => (step.conclusion ? !SUCCEEDED.has(step.conclusion) : false);
 const elapsed = (step: Step) =>
 	step.startedAt ? formatDuration((step.completedAt ? Date.parse(step.completedAt) : Date.now()) - Date.parse(step.startedAt)) : "";
 
