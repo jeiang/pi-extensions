@@ -152,7 +152,7 @@ async function heavyOf(drvs: string[], cwd: string, signal: AbortSignal | undefi
 	return [...heavy];
 }
 
-/** `alda` → its system toplevel; `.#x` and `nixpkgs#x` stay as they are; a bare attribute gets `<flake>#`. */
+/** `alda` → its system toplevel; `.#x` and `nixpkgs#x` stay as they are; any other installable gets `<flake>#`. */
 async function installableOf(output: string, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<string> {
 	if (output.includes("#") || output.startsWith("/nix/store/")) return output;
 	if (/^[\w-]+$/.test(output)) {
