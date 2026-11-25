@@ -20,6 +20,8 @@ export interface ChainsConfig {
 	retryCooldownMs?: number;
 	/** Milliseconds a provider is skipped after a subscription usage limit. */
 	usageCooldownMs?: number;
+	/** Fraction of the model's context window at which to compact when its chain has no `compactAt`. */
+	compactRatio?: number;
 }
 
 interface Target {
@@ -72,6 +74,8 @@ export function createChains(config: ChainsConfig) {
 	const cooldownFile = config.cooldownFile ?? join(getAgentDir(), "chains-cooldown.json");
 	const retryCooldownMs = config.retryCooldownMs ?? 60_000;
 	const usageCooldownMs = config.usageCooldownMs ?? 3_600_000;
+	if (config.compactRatio !== undefined && !(config.compactRatio > 0 && config.compactRatio <= 1))
+		throw new Error(`compactRatio must be greater than 0 and at most 1, got ${config.compactRatio}`);
 	const chains = new Map(
 		Object.entries(config.chains).map(([id, chain]) => [id, { ...chain, targets: chain.targets.map(parseTarget) }]),
 	);
@@ -155,9 +159,11 @@ export function createChains(config: ChainsConfig) {
 
 		// ctx.compact aborts a running agent, so it waits for the run to settle. A print-mode process exits there.
 		pi.on("agent_settled", (_event, ctx) => {
-			const compactAt = activeChain(ctx)?.compactAt;
-			const tokens = ctx.getContextUsage()?.tokens;
-			if (!ctx.hasUI || !compactAt || compacting || tokens == null || tokens <= compactAt) return;
+			const usage = ctx.getContextUsage();
+			if (!ctx.hasUI || !usage || usage.tokens === null || compacting) return;
+			const compactAt =
+				activeChain(ctx)?.compactAt ?? (config.compactRatio === undefined ? undefined : usage.contextWindow * config.compactRatio);
+			if (!compactAt || usage.tokens <= compactAt) return;
 			compacting = true;
 			// The callbacks can run after the session is replaced, when reading ctx throws.
 			const { ui } = ctx;
