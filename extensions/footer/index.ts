@@ -108,7 +108,10 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (totals.input || totals.output) out.push(theme.fg("syntaxFunction", `\uf090 ${count(totals.input)} \uf08b ${count(totals.output)}`));
-		if (totals.cacheRead || totals.cacheWrite) out.push(theme.fg("syntaxType", `\uf1c0 R ${count(totals.cacheRead)} W ${count(totals.cacheWrite)}`));
+		if (totals.cacheRead || totals.cacheWrite) {
+			// Providers that bill no cache writes report none: DeepSeek on Mistral, Codex, and local models.
+			out.push(theme.fg("syntaxType", `\uf1c0 R ${count(totals.cacheRead)}${totals.cacheWrite ? ` W ${count(totals.cacheWrite)}` : ""}`));
+		}
 		if (totals.cost) out.push(theme.fg("syntaxNumber", `$${totals.cost.toFixed(2)}`));
 
 		const usage = ctx.getContextUsage();
