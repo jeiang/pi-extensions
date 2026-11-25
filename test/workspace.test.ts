@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { grepRoute, progressBar } from "../extensions/workspace/shell.ts";
+import { grepRoute, lastLines, progressBar } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
@@ -219,6 +219,11 @@ test("a background job returns at the first matching line and keeps running", as
 	assert.match(first ?? "", /READY/);
 	assert.match(second ?? "", /killed/);
 	assert.ok(Date.now() - started < 4000);
+});
+
+test("tail reports truncated only when it left output out", () => {
+	assert.deepEqual(lastLines("a\nb\nc\n", 20), { content: "a\nb\nc", truncated: false });
+	assert.deepEqual(lastLines("a\nb\nc\n", 2), { content: "b\nc", truncated: true });
 });
 
 test("grepRoute serves plain rg and grep calls only", () => {
