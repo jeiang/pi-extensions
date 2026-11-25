@@ -6,7 +6,8 @@ import { Image } from "@earendil-works/pi-tui";
 import { sessionDir } from "../workspace/cwd.ts";
 
 const SVG_BLOCK = /^```svg\n([\s\S]*?)\n```/gm;
-const IMAGE_PATH = /!\[[^\]]*\]\(([^)\s]+\.(?:png|jpe?g|gif|webp))\)/gi;
+// A title after the destination, as in ![alt](shot.png "caption"), is legal Markdown.
+const IMAGE_PATH = /!\[[^\]]*\]\(([^)\s]+\.(?:png|jpe?g|gif|webp))(?:\s+"[^"]*")?\)/gi;
 const MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
 
 interface Picture {
