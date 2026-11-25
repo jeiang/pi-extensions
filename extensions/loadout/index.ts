@@ -5,7 +5,7 @@ import { Type } from "typebox";
 
 interface Loadout {
 	/** Tools left out of the model's tool list. They stay active, so codemode scripts can still call them. */
-	hidden: string[];
+	hidden?: string[];
 }
 
 const NAME = "loadout";
@@ -17,7 +17,10 @@ const NAME = "loadout";
 export default function (pi: ExtensionAPI) {
 	const file = process.env.PI_LOADOUT_CONFIG ?? join(getAgentDir(), "loadout.json");
 	if (!existsSync(file)) return;
-	const { hidden } = JSON.parse(readFileSync(file, "utf8")) as Loadout;
+	const parsed = JSON.parse(readFileSync(file, "utf8")) as Loadout;
+	const hidden = parsed.hidden ?? [];
+	// A string would spread into its characters and hide tools nobody named.
+	if (!Array.isArray(hidden) || hidden.some((name) => typeof name !== "string")) throw new Error(`${file}: "hidden" must be a list of tool names.`);
 	pi.registerTool({
 		name: NAME,
 		label: "Loadout",
