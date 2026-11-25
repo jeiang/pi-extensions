@@ -104,13 +104,42 @@ async function allow(ctx: ExtensionContext, title: string, detail: string): Prom
 	return ctx.ui.confirm(title, detail);
 }
 
+const STATE = "guards";
+
 export default function (pi: ExtensionAPI) {
+	let enabled = true;
+	const restore = (_event: unknown, ctx: ExtensionContext) => {
+		const saved = ctx.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom" && entry.customType === STATE)
+			.at(-1);
+		enabled = saved?.type !== "custom" || (saved.data as { enabled?: boolean } | undefined)?.enabled !== false;
+		ctx.ui.setStatus(STATE, enabled ? undefined : "guards off");
+	};
+	pi.on("session_start", restore);
+	pi.on("session_tree", restore);
+
+	pi.registerCommand(STATE, {
+		description: "Show or change the install, history, branch, and folder guards for this session: /guards [on|off]",
+		getArgumentCompletions: (prefix) => ["on", "off"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
+		handler: async (args, ctx) => {
+			const arg = args.trim();
+			if (arg === "on" || arg === "off") {
+				enabled = arg === "on";
+				pi.appendEntry(STATE, { enabled });
+				ctx.ui.setStatus(STATE, enabled ? undefined : "guards off");
+			} else if (arg) return ctx.ui.notify(`Expected on or off, got "${arg}"`, "error");
+			ctx.ui.notify(`Guards ${enabled ? "on" : "off"}; secret masking stays on`, "info");
+		},
+	});
+
 	pi.on("tool_call", async (event, ctx) => {
 		const input = event.input as Record<string, unknown>;
 		if (COMMAND_TOOLS[event.toolName] && typeof input.command === "string") {
 			const command = input.command;
 			const habit = commandHabit(command);
 			if (habit) return { block: true, reason: habit };
+			if (!enabled) return;
 			const violation = commandViolation(command);
 			if (violation && !(await allow(ctx, "Allow blocked command?", `${violation}\n\n${command}`))) {
 				return { block: true, reason: `${violation} If the user asked for it, ask them to run it.` };
@@ -126,7 +155,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			return;
 		}
-		if (PATH_TOOLS[event.toolName]) {
+		if (enabled && PATH_TOOLS[event.toolName]) {
 			const paths = [...(typeof input.path === "string" ? [input.path] : []), ...(Array.isArray(input.paths) ? input.paths.map(String) : [])];
 			for (const path of paths) {
 				const folder = restrictedFolder(path, sessionDir(ctx));
