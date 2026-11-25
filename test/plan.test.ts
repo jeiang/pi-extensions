@@ -1,10 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { planViolation } from "../extensions/plan/index.ts";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { findPlan, planViolation } from "../extensions/plan/index.ts";
 
 const dir = "/s/plans";
 const cwd = "/w";
 const reason = (tool: string, input: Record<string, unknown>) => planViolation(tool, input, dir, cwd);
+
+test("a proposal names the plan that exists, and nothing outside the plan directory", () => {
+	const dir = mkdtempSync(join(tmpdir(), "plan-files-"));
+	writeFileSync(join(dir, "add-cache.md"), "# plan\n");
+	writeFileSync(join(tmpdir(), "outside-plan.md"), "# other\n");
+	assert.equal(findPlan(dir, "add-cache"), join(dir, "add-cache.md"));
+	assert.equal(findPlan(dir, "add-cache.md"), join(dir, "add-cache.md"));
+	// A typo is not another plan, and a slug cannot walk out of the directory.
+	assert.equal(findPlan(dir, "add-cach"), undefined);
+	assert.equal(findPlan(dir, "../outside-plan"), undefined);
+});
 
 test("plan mode blocks writes outside the plan directory and allows the plan's own files", () => {
 	assert.equal(reason("write", { path: "/s/plans/a.md" }), undefined);

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -81,15 +81,12 @@ ${plan}
 </plan>`;
 }
 
-/** The plan file for `slug`, or the newest one in `dir`. */
-function findPlan(dir: string, slug: string): string | undefined {
-	const named = join(dir, `${slug.replace(/\.md$/, "")}.md`);
-	if (existsSync(named)) return named;
-	if (!existsSync(dir)) return undefined;
-	return readdirSync(dir)
-		.filter((name) => name.endsWith(".md"))
-		.map((name) => join(dir, name))
-		.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+/** The plan file for `slug`: a slug never leaves `dir`, and a name that does not exist is not another plan. */
+export function findPlan(dir: string, slug: string): string | undefined {
+	const name = slug.replace(/\.md$/, "");
+	if (!/^[\w-]+$/.test(name)) return undefined;
+	const named = join(dir, `${name}.md`);
+	return existsSync(named) ? named : undefined;
 }
 
 export default function (pi: ExtensionAPI) {
