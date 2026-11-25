@@ -51,25 +51,38 @@ const count = (tokens: number) =>
 export default function (pi: ExtensionAPI) {
 	let git: GitState | undefined;
 	let gitRunning = false;
-	let gitStale = false;
+	/** The request that arrived while git ran: another may be for a different session's checkout. */
+	let gitPending: ExtensionContext | undefined;
 	let totals: Totals = costBreakdown([]).total;
 	let requestRender: (() => void) | undefined;
+
+	// ctx throws once its session is replaced, which is also when a result no longer belongs on screen.
+	const sessionId = (ctx: ExtensionContext) => {
+		try {
+			return ctx.sessionManager.getSessionId();
+		} catch {
+			return undefined;
+		}
+	};
 
 	// Off the render path: git status can be slow on a large repository, so the footer draws the last result.
 	const refreshGit = (ctx: ExtensionContext) => {
 		if (gitRunning) {
-			gitStale = true;
+			gitPending = ctx;
 			return;
 		}
 		gitRunning = true;
+		const id = sessionId(ctx);
 		execFile("git", ["status", "--porcelain=v2", "--branch"], { cwd: sessionDir(ctx), timeout: 5000 }, (error, stdout) => {
-			git = error ? undefined : parseStatus(stdout);
 			gitRunning = false;
-			requestRender?.();
-			if (gitStale) {
-				gitStale = false;
-				refreshGit(ctx);
+			const pending = gitPending;
+			gitPending = undefined;
+			// A session switch while git ran: the answer describes the old checkout.
+			if (sessionId(ctx) === id) {
+				git = error ? undefined : parseStatus(stdout);
+				requestRender?.();
 			}
+			if (pending) refreshGit(pending);
 		});
 	};
 
