@@ -5,6 +5,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { askAdvisor, type Review } from "../advisor/review.ts";
+import { effectsOf } from "../workspace/effects.ts";
 
 const ENTRY = "plan";
 const CONTEXT = "plan-mode-context";
@@ -40,27 +41,20 @@ function insideDir(path: string, dir: string, cwd: string): boolean {
 }
 
 /** Why a tool call would change something outside the plan directory, or undefined when it may run. */
-function planViolation(tool: string, input: Record<string, unknown>, dir: string, cwd: string): string | undefined {
+export function planViolation(tool: string, input: Record<string, unknown>, dir: string, cwd: string): string | undefined {
 	const outside = `Plan mode: only files in ${dir} may change until the user approves the plan.`;
-	switch (tool) {
-		case "write":
-		case "replace":
-			return typeof input.path === "string" && insideDir(input.path, dir, cwd) ? undefined : outside;
-		case "edit": {
-			// pi's own edit names one path; the workspace's hashline edit names its files inside the patch.
-			if (typeof input.input !== "string") return typeof input.path === "string" && insideDir(input.path, dir, cwd) ? undefined : outside;
-			const patch = input.input;
-			const paths = [...patch.matchAll(/^\[([^\]#\n]+)#/gm)].map((m) => m[1] ?? "");
-			if (/^(REM|MV)\b/m.test(patch)) return "Plan mode: deleting or renaming files is not allowed.";
-			return paths.length > 0 && paths.every((path) => insideDir(path, dir, cwd)) ? undefined : outside;
-		}
-		case "substitute":
-			return outside;
-		case "worktree":
-			return input.action === "list" ? undefined : "Plan mode: worktree changes wait until the user approves the plan.";
-		case "github":
-			return input.op === "pr_create" || input.op === "pr_merge" ? "Plan mode: pull request changes wait until the user approves the plan." : undefined;
+	const effect = effectsOf(tool, input, cwd);
+	// A shell command, a subagent, or a tool nobody classified: the prompt forbids state changes, and only the model can tell.
+	if (effect.kind === "read" || effect.kind === "opaque") return undefined;
+	if (effect.kind === "mutate") {
+		if (tool === "worktree") return "Plan mode: worktree changes wait until the user approves the plan.";
+		if (tool === "github") return "Plan mode: pull request changes wait until the user approves the plan.";
+		return outside;
 	}
+	if (tool === "edit" && typeof input.input === "string" && /^(REM|MV)\b/m.test(input.input)) return "Plan mode: deleting or renaming files is not allowed.";
+	// No known target is not permission: a call nobody can place stays outside.
+	if (effect.paths.length === 0) return outside;
+	return effect.paths.every((path) => insideDir(path, dir, cwd)) ? undefined : outside;
 }
 
 function planningPrompt(dir: string): string {
