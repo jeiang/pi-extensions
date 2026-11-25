@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -74,8 +74,10 @@ async function cached(key: string, load: () => Promise<Env>): Promise<Env> {
 		return JSON.parse(readFileSync(file, "utf8")) as Env;
 	} catch {
 		const env = await load();
-		mkdirSync(cacheDir(), { recursive: true });
-		writeFileSync(file, JSON.stringify(env));
+		// A devshell's exports can carry credentials, and an entry written before this keeps its old mode.
+		mkdirSync(cacheDir(), { recursive: true, mode: 0o700 });
+		writeFileSync(file, JSON.stringify(env), { mode: 0o600 });
+		chmodSync(file, 0o600);
 		return env;
 	}
 }
