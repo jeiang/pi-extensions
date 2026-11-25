@@ -3,29 +3,31 @@ import { test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { createAdvisor, parseAdvice } from "../extensions/advisor/index.ts";
+import type { JsonObject } from "@earendil-works/pi-ai";
 import { type Call, createTestSession, scriptedProviders } from "./harness.ts";
 
-const editTool = (pi: ExtensionAPI) => {
+const fakeTool = (pi: ExtensionAPI, name: string) => {
 	pi.registerTool({
-		name: "edit",
-		label: "edit",
+		name,
+		label: name,
 		description: "Returns ok.",
-		parameters: Type.Object({}),
+		parameters: Type.Object({ op: Type.Optional(Type.String()), method: Type.Optional(Type.String()) }),
 		async execute() {
 			return { content: [{ type: "text", text: "ok" }], details: {} };
 		},
 	});
 };
 
-async function run(advice: string, acts = true) {
+async function run(advice: string, acts = true, tool = "edit", args: JsonObject = {}) {
 	const calls: Call[] = [];
 	const { session } = await createTestSession({
 		extensions: [
 			scriptedProviders((model, _context, index) => {
 				if (model === "p2/m") return { text: advice };
-				return acts && index === 0 ? { tool: "edit", args: {} } : { text: "main answer" };
+				return acts && index === 0 ? { tool, args } : { text: "main answer" };
 			}, calls),
-			editTool,
+			(pi) => fakeTool(pi, "edit"),
+			(pi) => fakeTool(pi, "github"),
 			createAdvisor({ models: ["p2/m:low"], enabled: true }),
 		],
 		model: ["p1", "m"],
@@ -55,6 +57,10 @@ test("nits are recorded for display and do not continue the run", async () => {
 	const { models, nits } = await run("nit: the variable name is stale.");
 	assert.deepEqual(models, ["p1/m", "p1/m", "p2/m"]);
 	assert.deepEqual(nits, ["nit: the variable name is stale."]);
+});
+
+test("a run that only merged a pull request is reviewed", async () => {
+	assert.deepEqual((await run("LGTM", true, "github", { op: "pr_merge", method: "squash" })).models, ["p1/m", "p1/m", "p2/m"]);
 });
 
 test("a run without a file or process tool call is not reviewed", async () => {
