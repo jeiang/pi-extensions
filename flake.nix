@@ -33,6 +33,10 @@
           substituteInPlace $out/node_modules/pi-lens/dist/index.js \
             --replace-fail 'const targetIgnored = isPathIgnoredByProject(' 'const targetIgnored = !filePath.includes("/.worktrees/") && isPathIgnoredByProject(' \
             --replace-fail 'if (isPathIgnoredByProject(filePath, deps._ownerRoot ?? workspaceRoot, false)) {' 'if (!filePath.includes("/.worktrees/") && isPathIgnoredByProject(filePath, deps._ownerRoot ?? workspaceRoot, false)) {'
+          # pi-web-access reads any `data:` as an inline data URI, so Rust source like `data: &[u8]`
+          # became an omission marker; a comma-less token that holds whitespace is code, not a URI.
+          substituteInPlace $out/node_modules/pi-web-access/dist/index.js \
+            --replace-fail 'if (missingComma && end === headerStart && candidate.enclosure === null) {' 'if (missingComma && (end === headerStart ? candidate.enclosure === null : /[ \t]/.test(text7.slice(headerStart, end)))) {'
           runHook postInstall
         '';
       };
