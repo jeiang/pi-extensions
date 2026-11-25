@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { EditStore } from "@oh-my-pi/pi-natives";
 import workspace from "../extensions/workspace/index.ts";
 import { parseGrep, structuredGrep } from "../extensions/workspace/grep.ts";
+import { hashlineRead, hashlineTools, patchTargets } from "../extensions/workspace/hashline.ts";
+import { withFileLocks } from "../extensions/workspace/mutation.ts";
 import { substituteTool } from "../extensions/workspace/substitute.ts";
 import { createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -45,6 +47,40 @@ test("replace refuses text that occurs twice or differs only in whitespace, and 
 	assert.match(results[1] ?? "", /2 occurrences/);
 	assert.match(results[2] ?? "", /exact text/);
 	assert.equal(readFileSync(file, "utf8"), "A\nb = 2;\nb = 2;\n");
+});
+
+test("two replaces on one file at once both land", async () => {
+	const dir = temp();
+	const file = join(dir, "f.txt");
+	writeFileSync(file, "a = 1;\nb = 2;\n");
+	const store = new EditStore();
+	await hashlineRead(store, dir, { path: "f.txt" });
+	const tool = hashlineTools(store).replace(dir);
+	const replace = (id: string, old_string: string, new_string: string) =>
+		tool.execute(id, { path: "f.txt", old_string, new_string }, undefined, undefined, undefined as never);
+	await Promise.all([replace("1", "a = 1;", "A"), replace("2", "b = 2;", "B")]);
+	assert.equal(readFileSync(file, "utf8"), "A\nB\n");
+});
+
+test("a patch locks every file it writes, a rename's destination included", () => {
+	assert.deepEqual(patchTargets("/w", "hashline", { input: '[a.ts#AAAAAAAA]\nPUT 1.=1:\n+x\nMV "dir/b new.ts"\n' }), ["/w/a.ts", "/w/dir/b new.ts"]);
+	assert.deepEqual(patchTargets("/w", "replace", { path: "c.txt", old_string: "x", new_string: "y" }), ["/w/c.txt"]);
+});
+
+test("two names for one file take one lock and do not wait on each other", async () => {
+	const dir = temp();
+	const file = join(dir, "f.txt");
+	writeFileSync(file, "x\n");
+	const alias = join(tmpdir(), `alias-${process.pid}-${Date.now()}`);
+	symlinkSync(dir, alias);
+	let ran = false;
+	await Promise.race([
+		withFileLocks([file, join(alias, "f.txt")], async () => {
+			ran = true;
+		}),
+		new Promise((_, fail) => setTimeout(() => fail(new Error("the same file was locked twice")), 2000)),
+	]);
+	assert.equal(ran, true);
 });
 
 test("substitute previews without writing, refuses a stale token, and searches gitignored files only when named", async () => {
