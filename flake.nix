@@ -43,7 +43,7 @@
     });
 
     devShells = forAllSystems (pkgs: {
-      default = pkgs.mkShell {packages = [pkgs.nodejs_24 pkgs.bun];};
+      default = pkgs.mkShell {packages = [pkgs.nodejs_24 pkgs.bun pkgs.ripgrep];};
     });
   };
 }
