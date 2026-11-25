@@ -12,6 +12,7 @@ import { resolve } from "node:path";
 import { type Static, type TObject, Type } from "typebox";
 import { restrictedFolder } from "../guards/index.ts";
 import { setSessionDir } from "./cwd.ts";
+import { effectsOf } from "./effects.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
 import { structuredGrep } from "./grep.ts";
 import { hashlineTools } from "./hashline.ts";
@@ -212,21 +213,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			return;
 		}
-		if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "replace" || event.toolName === "substitute") {
-			if (!needsWorktree()) return;
-			const paths =
-				typeof input.path === "string"
-					? [input.path]
-					: typeof input.input === "string"
-						? [...input.input.matchAll(/\[([^\]#\n]+)#/g)].map((match) => match[1] ?? "")
-						: Array.isArray(input.paths)
-							? input.paths.map(String)
-							: event.toolName === "substitute"
-								? ["."]
-								: [];
-			if (paths.some(inMainCheckout)) return { block: true, reason: NEEDS_WORKTREE };
-			return;
-		}
+		if (!needsWorktree()) return;
+		const effect = effectsOf(event.toolName, input, cwd());
+		if (effect.kind === "write" && effect.paths.some(inMainCheckout)) return { block: true, reason: NEEDS_WORKTREE };
 	});
 
 	pi.on("tool_result", async (event) => {
