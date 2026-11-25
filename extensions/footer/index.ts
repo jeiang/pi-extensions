@@ -42,7 +42,10 @@ export function parseStatus(output: string): GitState {
 	return state;
 }
 
-const count = (tokens: number) => (tokens < 1000 ? `${tokens}` : tokens < 1_000_000 ? `${(tokens / 1000).toFixed(1)}k` : `${(tokens / 1_000_000).toFixed(1)}M`);
+const count = (tokens: number) =>
+	tokens < 1000
+		? `${tokens}`
+		: (tokens < 1_000_000 ? `${(tokens / 1000).toFixed(1)}k` : `${(tokens / 1_000_000).toFixed(1)}M`).replace(".0", "");
 
 /** The footer: one icon per segment, a color per group, and a thin separator between segments. */
 export default function (pi: ExtensionAPI) {
@@ -95,9 +98,10 @@ export default function (pi: ExtensionAPI) {
 		if (totals.cacheRead || totals.cacheWrite) out.push(theme.fg("syntaxType", `\uf1c0 R ${count(totals.cacheRead)} W ${count(totals.cacheWrite)}`));
 		if (totals.cost) out.push(theme.fg("syntaxNumber", `$${totals.cost.toFixed(2)}`));
 
-		const percent = ctx.getContextUsage()?.percent;
-		if (percent != null) {
-			const text = `\ue70f ${Math.round(percent)}%`;
+		const usage = ctx.getContextUsage();
+		if (usage?.percent != null) {
+			const percent = usage.percent;
+			const text = `\ue70f ${Math.round(percent)}% / ${count(usage.contextWindow)}`;
 			out.push(percent >= 90 ? theme.fg("error", text) : percent >= 70 ? theme.bold(theme.fg("warning", text)) : theme.fg(percent >= 50 ? "warning" : "muted", text));
 		}
 
