@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -54,7 +55,7 @@ export function loadAgents(dir: string): Agent[] {
 }
 
 /** Arguments of the `pi` child for `agent`. `subagent` stays out of the child, so children cannot nest. */
-export function childArgs(agent: Agent, task: string, sessionDir: string | undefined): string[] {
+export function childArgs(agent: Agent, task: string, sessionDir: string | undefined, sessionId?: string): string[] {
 	return [
 		"--mode",
 		"json",
@@ -68,9 +69,15 @@ export function childArgs(agent: Agent, task: string, sessionDir: string | undef
 		...(agent.prompt ? ["--append-system-prompt", agent.prompt] : []),
 		...(agent.inheritProjectContext ? [] : ["-nc"]),
 		...(sessionDir ? ["--session-dir", sessionDir] : ["--no-session"]),
+		// pi reopens the existing transcript for this id, so a resumed child continues where it stopped.
+		...(sessionId ? ["--session-id", sessionId] : []),
 		"--",
 		task,
 	];
+}
+/** Whether `dir` holds the transcript of child session `id`; pi names it `<timestamp>_<id>.jsonl`. */
+export function sessionExists(dir: string, id: string): boolean {
+	return existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(`_${id}.jsonl`));
 }
 
 interface Child {
@@ -109,11 +116,12 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		waiting.shift()?.();
 	};
 
-	/** Runs one child to its end. `text` is its final answer, or on failure the reason and the stderr tail; `usage` sums the child's model calls. */
+	/** Runs one child to its end. `text` is its final answer, or on failure the reason, the stderr tail, and the session to resume; `usage` sums the child's model calls. */
 	const run = async (
 		agent: Agent,
 		task: string,
 		sessionDir: string | undefined,
+		session: string,
 		signal: AbortSignal | undefined,
 		onProgress?: (line: string) => void,
 	): Promise<{ text: string; failed: boolean; usage?: Usage }> => {
@@ -122,7 +130,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		try {
 			if (signal?.aborted) throw new Error("Cancelled before the child started.");
 			const cwd = options.cwd();
-			const child = spawn("pi", childArgs(agent, task, sessionDir), { cwd, env: await options.env(cwd), stdio: ["ignore", "pipe", "pipe"] });
+			const child = spawn("pi", childArgs(agent, task, sessionDir, session), { cwd, env: await options.env(cwd), stdio: ["ignore", "pipe", "pipe"] });
 			const kill = () => void child.kill("SIGTERM");
 			children.set(id, { id, agent: agent.name, kill });
 			signal?.addEventListener("abort", kill, { once: true });
@@ -163,7 +171,13 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			signal?.removeEventListener("abort", kill);
 			if (!exit && answer && stop !== "error" && stop !== "aborted") return { text: answer, failed: false, usage };
 			const reason = [exit, stop === "error" || stop === "aborted" ? `model ${stop}` : "", !answer ? "no answer" : ""].filter(Boolean).join(", ");
-			const text = [`${agent.name} failed (${reason}).`, error, stderr.trim() && `stderr:\n${stderr.trim()}`, sessionDir && `transcript: ${sessionDir}`]
+			const text = [
+				`${agent.name} failed (${reason}).`,
+				error,
+				stderr.trim() && `stderr:\n${stderr.trim()}`,
+				// The child's transcript outlives the failure; its id is the handle to continue it.
+				sessionDir && `session ${session}; resume it with { agent: "${agent.name}", resume: "${session}" }`,
+			]
 				.filter(Boolean)
 				.join("\n");
 			return { text, failed: true, usage };
@@ -179,54 +193,76 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 
 	const params = Type.Object({
 		agent: Type.String({ description: `One of: ${agents.map((agent) => agent.name).join(", ")}.` }),
-		task: Type.String({ description: "The whole assignment: the question, the file paths and facts you already have, and what to return." }),
+		task: Type.Optional(
+			Type.String({ description: "The whole assignment: the question, the file paths and facts you already have, and what to return. Leave it out when resume is given." }),
+		),
+		resume: Type.Optional(
+			Type.String({ description: "Session id of an earlier child of the same agent, to continue it with its transcript instead of starting fresh." }),
+		),
 		background: Type.Optional(Type.Boolean({ description: "Return at once; you are woken with the result." })),
 	});
 	const outputSchema = Type.Object({
 		agent: Type.String(),
 		status: Type.String({ description: "done, failed, or background (you are woken with the result later)" }),
 		answer: Type.String({ description: "The child's final answer, or why it failed." }),
+		session: Type.String({ description: "The child's session id; pass it back as resume to continue that child." }),
 	});
-	const text = (value: string, agent: string, status: "done" | "failed" | "background", usage?: Usage): AgentToolResult<undefined> & { structuredContent: Static<typeof outputSchema> } => ({
+	const text = (
+		value: string,
+		agent: string,
+		status: "done" | "failed" | "background",
+		session: string,
+		usage?: Usage,
+	): AgentToolResult<undefined> & { structuredContent: Static<typeof outputSchema> } => ({
 		content: [{ type: "text", text: value }],
 		details: undefined,
 		usage,
 		isError: status === "failed",
-		structuredContent: { agent, status, answer: status === "background" ? "" : value },
+		structuredContent: { agent, status, answer: status === "background" ? "" : value, session },
 	});
 
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message, or Promise.all in a script; at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background. Scripts get { agent, status, answer }.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
+		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message, or Promise.all in a script; at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background. A failed or aborted child names its session; pass that id as resume, with the same agent, to continue it where it stopped. Scripts get { agent, status, answer, session }.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
 		promptSnippet: `Delegate to a read-only child agent (${agents.map((agent) => agent.name).join(", ")})`,
 		parameters: params,
 		outputSchema,
 		async execute(id, input: Static<typeof params>, signal, onUpdate, ctx) {
 			const agent = agents.find((candidate) => candidate.name === input.agent);
 			if (!agent) throw new Error(`No agent "${input.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
+			const task = input.task?.trim() || (input.resume ? "You were interrupted mid-task. Continue from where you stopped and give your final answer." : "");
+			if (!task) throw new Error("subagent needs a task, unless resume names a session to continue.");
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			const sessionDir = sessionFile ? join(ctx.sessionManager.getSessionDir(), "subagents", ctx.sessionManager.getSessionId()) : undefined;
+			if (input.resume && !(sessionDir && sessionExists(sessionDir, input.resume)))
+				throw new Error(`No child session ${input.resume} to resume; children live in ${sessionDir ?? "no directory, because this session is unsaved"}.`);
+			const session = input.resume ?? randomUUID();
 			const report = (result: ReturnType<typeof run>) =>
 				void result.then(
-					(done) => wake(done.failed ? `Subagent ${done.text}` : `Subagent ${agent.name} finished:\n${done.text}`, done.failed, done.usage),
-					(error: Error) => wake(`Subagent ${agent.name} failed: ${error.message}`, true, undefined),
+					(done) => wake(done.failed ? `Subagent (session ${session}) ${done.text}` : `Subagent ${agent.name} finished (session ${session}):\n${done.text}`, done.failed, done.usage),
+					(error: Error) => wake(`Subagent ${agent.name} failed (session ${session}): ${error.message}`, true, undefined),
 				);
 			const wake = (content: string, error: boolean, usage: Usage | undefined) =>
 				pi.sendMessage({ customType: "subagent", content, display: true, details: { error, usage } }, { triggerTurn: true, deliverAs: "steer" });
 			if (input.background) {
 				// A background child outlives the tool call, so the call's signal does not cancel it.
-				report(run(agent, input.task, sessionDir, undefined));
-				return text(`Launched ${agent.name} in the background; you are woken with its result or its failure.`, agent.name, "background");
+				report(run(agent, task, sessionDir, session, undefined));
+				return text(`Launched ${agent.name} in the background as session ${session}; you are woken with its result or its failure.`, agent.name, "background", session);
 			}
 			const outcome = await untilInterrupt(id, signal, (childSignal, attached) =>
-				run(agent, input.task, sessionDir, childSignal, (line) => {
+				run(agent, task, sessionDir, session, childSignal, (line) => {
 					if (attached()) onUpdate?.({ content: [{ type: "text", text: line }], details: undefined });
 				}),
 			);
-			if ("value" in outcome) return text(outcome.value.text, agent.name, outcome.value.failed ? "failed" : "done", outcome.value.usage);
+			if ("value" in outcome) return text(outcome.value.text, agent.name, outcome.value.failed ? "failed" : "done", session, outcome.value.usage);
 			report(outcome.background);
-			return text(`The user interrupted; ${agent.name} moved to the background and you are woken with its result or its failure.`, agent.name, "background");
+			return text(
+				`The user interrupted; ${agent.name} moved to the background as session ${session} and you are woken with its result or its failure.`,
+				agent.name,
+				"background",
+				session,
+			);
 		},
 	});
 
