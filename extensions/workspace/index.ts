@@ -220,11 +220,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_result", async (event) => {
 		if (event.toolName !== "github" || event.isError || !repo || repo.linked) return;
-		const text = event.content.map((part) => (part.type === "text" ? part.text : "")).join("");
-		if (/"mergedAt": "\d/.test(text)) await fastForwardMain(repo.root, await baseRef(repo.root));
+		// The structured result says the merge happened; the rendered JSON is prose that may be reworded.
+		const pr = (event.structuredContent as { pr?: { mergedAt?: string | null } } | undefined)?.pr;
+		if (pr?.mergedAt) await fastForwardMain(repo.root, await baseRef(repo.root));
 	});
 
-	const worktreeParams = Type.Object({
+const worktreeParams = Type.Object({
 		action: Type.Union([
 			Type.Literal("create"),
 			Type.Literal("enter"),
