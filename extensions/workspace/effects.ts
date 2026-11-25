@@ -21,15 +21,34 @@ const MUTATE: Effect = { kind: "mutate" };
 const OPAQUE: Effect = { kind: "opaque" };
 
 /** Tools that never change the repository; `nix` builds in the store, not in the tree. */
-const READ_ONLY = new Set(["read", "grep", "find", "ls", "read_text", "todo", "questionnaire", "sleep", "advise", "papercut", "nix", "propose"]);
+const READ_ONLY = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"read_text",
+	"todo",
+	"questionnaire",
+	"sleep",
+	"advise",
+	"papercut",
+	"nix",
+	"propose",
+	// pi-lens's navigation tools name a path but write nothing; the prefixes cover its families.
+	"symbol_search",
+	"effective_config",
+	"project_report",
+	"module_report",
+	"read_symbol",
+	"read_enclosing",
+]);
+const READS = /^(lsp_|lens_|pilens_|ast_grep_|pi_lens_)/;
 
 const named = (input: Record<string, unknown>): string[] =>
 	Array.isArray(input.paths) ? input.paths.map(String) : typeof input.path === "string" ? [input.path] : [];
 
 export function effectsOf(tool: string, input: Record<string, unknown>, cwd: string): Effect {
-	if (READ_ONLY.has(tool)) return READ;
-	// lsp_apply writes every file a workspace edit names, which the call does not list.
-	if (tool.startsWith("lsp_")) return tool === "lsp_apply" ? OPAQUE : READ;
+	if (READ_ONLY.has(tool) || READS.test(tool)) return tool === "lsp_apply" ? OPAQUE : READ;
 	switch (tool) {
 		case "edit":
 			// The workspace's hashline edit names its files inside the patch; pi's own edit names one path.

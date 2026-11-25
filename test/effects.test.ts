@@ -6,9 +6,11 @@ const cwd = "/w";
 const kind = (tool: string, input: Record<string, unknown> = {}) => effectsOf(tool, input, cwd).kind;
 
 test("reading leaves the working tree alone", () => {
-	for (const tool of ["read", "grep", "find", "ls", "read_text", "todo", "questionnaire", "sleep", "nix", "lsp_hover"]) {
+	for (const tool of ["read", "grep", "find", "ls", "read_text", "todo", "questionnaire", "sleep", "nix", "lsp_hover", "symbol_search", "pi_lens_activate_tools"]) {
 		assert.equal(kind(tool), "read", tool);
 	}
+	// A lens reader names a path, so it must not be mistaken for a writer.
+	assert.equal(kind("symbol_search", { path: "src/main.rs" }), "read");
 });
 
 test("file tools write the paths they name", () => {
