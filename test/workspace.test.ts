@@ -222,6 +222,53 @@ test("prune removes merged, squash-merged, fast-forwarded, unused, and detached 
 	assert.equal(git(dir, "branch", "--list", "merged", "squashed", "unused", "fast-forwarded"), "");
 });
 
+test("exit removes a worktree the session started in, deletes its merged branch, and returns to the main checkout", async () => {
+	const dir = repo();
+	const wt = await createWorktree(dir, "exit-merged");
+	writeFileSync(join(wt.path, "x"), "x\n");
+	execFileSync("git", ["add", "x"], { cwd: wt.path });
+	execFileSync("git", ["commit", "-qm", "x"], { cwd: wt.path });
+	execFileSync("git", ["merge", "-q", "--ff-only", "exit-merged"], { cwd: dir });
+	const { session: s } = await session(wt.path, [
+		{ tool: "worktree", args: { action: "exit" } },
+		{ tool: "worktree", args: { action: "list" } },
+		{ tool: "bash", args: { command: "pwd" } },
+	]);
+	await s.prompt("leave");
+	s.dispose();
+	assert.equal(existsSync(wt.path), false);
+	assert.equal(execFileSync("git", ["branch", "--list", "exit-merged"], { cwd: dir, encoding: "utf8" }), "");
+	assert.match(toolResults(s).at(-2) ?? "", /No worktrees/);
+	assert.ok((toolResults(s).at(-1) ?? "").split("\n").includes(dir));
+});
+
+test("exit keeps the branch when its work is not merged", async () => {
+	const dir = repo();
+	const wt = await createWorktree(dir, "exit-open");
+	writeFileSync(join(wt.path, "y"), "y\n");
+	execFileSync("git", ["add", "y"], { cwd: wt.path });
+	execFileSync("git", ["commit", "-qm", "y"], { cwd: wt.path });
+	const { session: s } = await session(wt.path, [{ tool: "worktree", args: { action: "exit" } }]);
+	await s.prompt("leave");
+	s.dispose();
+	assert.equal(existsSync(wt.path), false);
+	assert.equal(execFileSync("git", ["branch", "--list", "exit-open"], { cwd: dir, encoding: "utf8" }).trim(), "exit-open");
+});
+
+test("exit removes a worktree the session created and returns to the main checkout", async () => {
+	const dir = repo();
+	const { session: s } = await session(dir, [
+		{ tool: "worktree", args: { action: "create", name: "exit-own" } },
+		{ tool: "worktree", args: { action: "exit" } },
+		{ tool: "bash", args: { command: "pwd" } },
+	]);
+	await s.prompt("leave");
+	s.dispose();
+	assert.equal(existsSync(join(dir, ".worktrees", "exit-own")), false);
+	assert.equal(execFileSync("git", ["branch", "--list", "exit-own"], { cwd: dir, encoding: "utf8" }), "");
+	assert.ok((toolResults(s).at(-1) ?? "").split("\n").includes(dir));
+});
+
 test("a background job returns at the first matching line and keeps running", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "ws-shell-"));
 	const { session: s } = await session(dir, [
