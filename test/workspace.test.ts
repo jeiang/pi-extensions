@@ -5,8 +5,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { grepRoute, lastLines, progressBar, waitBound } from "../extensions/workspace/shell.ts";
-import { childArgs, loadAgents, sessionExists } from "../extensions/workspace/subagent.ts";
+import { grepRoute, lastLines, progressBar, ttyCommand, waitBound } from "../extensions/workspace/shell.ts";
+import { childArgs, loadAgents, sessionDigest, sessionExists } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -273,6 +273,35 @@ test("a child session is found by the id pi put in its transcript's name", () =>
 	assert.equal(sessionExists(dir, "0190-abc"), true);
 	assert.equal(sessionExists(dir, "0190-ab"), false);
 	assert.equal(sessionExists(join(dir, "absent"), "0190-abc"), false);
+});
+
+test("the digest tells a throwaway child where the session stands", () => {
+	const entries = [
+		{ type: "custom", customType: "checkpoint", data: { state: "done: x\nnext: y", at: "t" } },
+		{ type: "message", message: { role: "user", content: [{ type: "text", text: "wire the parser" }] } },
+		{
+			type: "message",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "edit", input: { input: "[src/a.ts#ABCD]\nPUT 1.=1:\n+x" } },
+					{ type: "toolCall", name: "shell", input: { command: "bun test" } },
+				],
+			},
+		},
+	];
+	const digest = sessionDigest(entries, "is the parser wired?");
+	assert.match(digest, /Checkpoint:\ndone: x/);
+	assert.match(digest, /Last request from the user:\nwire the parser/);
+	assert.match(digest, /edit src\/a\.ts/);
+	assert.match(digest, /shell bun test/);
+	assert.match(digest, /Files touched:\nsrc\/a\.ts/);
+	assert.match(digest, /is the parser wired\?$/);
+});
+
+test("the tty wrapper differs by platform and quotes the command", () => {
+	assert.equal(ttyCommand("sudo true", "darwin"), "script -q /dev/null bash -c 'sudo true'");
+	assert.equal(ttyCommand("sudo true", "linux"), "script -qec 'sudo true' /dev/null");
 });
 
 test("a wait with no selector is bounded, and a selector is not", () => {

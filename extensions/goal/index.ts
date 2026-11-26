@@ -15,9 +15,11 @@ interface GoalState {
 	status: Status;
 	/** Continuations the harness has sent for this goal. */
 	turns: number;
+	/** The last three lines of the response that stopped the run, so the continuation can answer it. */
+	lastStop?: string;
 }
 
-function goalPrompt(state: GoalState, continuation: boolean): string {
+function goalPrompt(state: GoalState, continuation: boolean, budget?: string): string {
 	const opening = continuation
 		? `[GOAL MODE] Continuation ${state.turns}: the previous response did not finish the goal.`
 		: "[GOAL MODE] You are working autonomously until the goal is done.";
@@ -30,7 +32,27 @@ Your response does not end the run: the harness sends the next request when you 
 - Never end a response with a summary of what you would do next, options, a recommendation, or a "Needs you" section. A response that only reports is wasted; the run continues anyway.
 - If you genuinely need the user's decision, call the questionnaire tool: it waits for the answer and you continue afterwards. A question in prose does not stop the run.
 - Keep the plan file or todo list current as you go. The goal outlives compaction and a session restart, and that file is what you read next.
+${budget ? `- Context: ${budget}. It is never a reason to stop; compaction handles it.` : ""}
+${state.lastStop && continuation ? `- Your last response ended with: "${state.lastStop}". That is not a stop: finish it yourself, or ask with the questionnaire tool when only the user can decide.` : ""}
 - Call ${TOOL}({op:"complete", summary}) only when every part of the goal is done and checked. Finishing a milestone, writing a report, or running low on context is not the end; compaction handles context.`;
+}
+
+/** The last three non-empty lines of the run's final assistant message, for the next continuation to answer. */
+function lastLines(ctx: ExtensionContext): string | undefined {
+	const entries = ctx.sessionManager.getBranch();
+	const last = entries.filter((entry) => entry.type === "message" && entry.message?.role === "assistant").at(-1) as
+		| { message?: { content?: unknown } }
+		| undefined;
+	const content = last?.message?.content;
+	const text = Array.isArray(content)
+		? content.flatMap((part) => (part && typeof part === "object" && "text" in part && typeof part.text === "string" ? [part.text] : [])).join("\n")
+		: "";
+	const lines = text
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.slice(-3);
+	return lines.length > 0 ? lines.join(" ").slice(0, 300) : undefined;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -140,13 +162,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_before_settle", (event, ctx) => {
 		if (event.outcome !== "completed" || state?.status !== "active") return;
 		// The boundary persists this turn's state itself; appendEntry would land outside the validated proposal.
-		const next: GoalState = { ...state, turns: state.turns + 1 };
+		const usage = ctx.getContextUsage();
+		const budget =
+			usage?.tokens != null && usage.contextWindow
+				? `${Math.round(usage.tokens / 1000)}k of ${Math.round(usage.contextWindow / 1000)}k used (${Math.round(usage.percent ?? 0)}%)`
+				: undefined;
+		const next: GoalState = { ...state, turns: state.turns + 1, lastStop: lastLines(ctx) };
 		state = next;
 		showStatus(ctx);
 		return {
 			entries: [
 				{ type: "custom", customType: ENTRY, data: next },
-				{ type: "custom_message", customType: CONTINUATION, content: goalPrompt(next, true), display: false },
+				{ type: "custom_message", customType: CONTINUATION, content: goalPrompt(next, true, budget), display: false },
 			],
 			continue: true,
 		};

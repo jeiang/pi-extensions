@@ -28,13 +28,18 @@ const params = Type.Object({
 		}),
 	),
 	timeout: Type.Optional(Type.Number({ description: `Seconds before the call returns with the command still running in the background (default ${DEFAULT_WAIT_S}); it is not killed.` })),
+	tty: Type.Optional(Type.Boolean({ description: "Allocate a remote pty (-t), for sudo or a program that needs a terminal." })),
+	noStdin: Type.Optional(Type.Boolean({ description: "Never read stdin (-n); ignored when tty is set." })),
+	identity: Type.Optional(Type.String({ description: "Private key file (-i), for a host that is not in ~/.ssh/config." })),
+	port: Type.Optional(Type.Number({ description: "Remote port (-p)." })),
+	agentForward: Type.Optional(Type.Boolean({ description: "Forward the local ssh agent (-A) on the shared connection." })),
 	tail: Type.Optional(Type.Number({ description: "Return only the last N lines; the full output stays in the log file named in `log`." })),
 	background: Type.Optional(Type.Boolean({ description: "Start as a background shell job; tools.shell reads, waits on, or kills it." })),
 });
 type Params = Static<typeof params>;
 
 const outputSchema = Type.Object({
-	output: Type.String({ description: "Combined stdout and stderr, up to 1 MiB." }),
+	output: Type.String({ description: "stdout up to 1 MiB; stderr is the other field and the log holds both." }),
 	truncated: Type.Optional(Type.Boolean()),
 	log: Type.Optional(Type.String()),
 	exit_code: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
@@ -54,6 +59,16 @@ export function sshOptions(options: Params["options"] = {}): string[] {
 		merged[key] = typeof value === "boolean" ? (value ? "yes" : "no") : String(value);
 	}
 	return Object.entries(merged).flatMap(([key, value]) => ["-o", `${key}=${value}`]);
+}
+
+/** Options that belong to the shared connection, so two calls with different keys cannot share one. */
+export function connectionFlags(input: { identity?: string; port?: number; agentForward?: boolean }): string[] {
+	return [...(input.identity ? ["-i", input.identity] : []), ...(input.port ? ["-p", String(input.port)] : []), ...(input.agentForward ? ["-A"] : [])];
+}
+
+/** Options for one session on the connection; a pty and `-n` are alternatives, so the pty wins. */
+export function sessionFlags(input: { tty?: boolean; noStdin?: boolean }): string[] {
+	return input.tty ? ["-t"] : input.noStdin ? ["-n"] : [];
 }
 
 /**
@@ -120,9 +135,9 @@ export function registerSsh(pi: ExtensionAPI, shell: Shell) {
 		exposure: "codemode",
 		async execute(_id, input: Params, signal, onUpdate) {
 			if (!HOST.test(input.host) || input.host.startsWith("-")) throw new Error(`Not a host: ${input.host}`);
-			const opts = sshOptions(input.options);
+			const opts = [...sshOptions(input.options), ...connectionFlags(input)];
 			const path = await ensureMaster(input.host, opts);
-			const command = ["ssh", ...opts, "-o", "ControlMaster=no", "-o", `ControlPath=${path}`, "--", input.host, remoteCommand(input.command, input.cwd)]
+			const command = ["ssh", ...opts, ...sessionFlags(input), "-o", "ControlMaster=no", "-o", `ControlPath=${path}`, "--", input.host, remoteCommand(input.command, input.cwd)]
 				.map(quote)
 				.join(" ");
 			const label = `ssh ${input.host}${input.cwd ? ` (in ${input.cwd})` : ""}: ${input.command}`;
