@@ -53,7 +53,7 @@ export default function (pi: ExtensionAPI) {
 
 	const cwd = (dir?: string) => {
 		const base = worktree?.path ?? sessionCwd;
-		return dir ? resolve(base, String(remap(dir))) : base;
+		return dir ? resolve(base, String(dir)) : base;
 	};
 	// Built-in tools resolve relative paths against ctx.cwd, which pi cannot change mid-session.
 	const inCwd = <T extends ExtensionContext>(ctx: T, dir: string): T =>
@@ -65,6 +65,13 @@ export default function (pi: ExtensionAPI) {
 			},
 		});
 	const remap = (path: unknown) => (typeof path === "string" && repo && worktree ? remapPath(path, repo.root, worktree.path) : path);
+	/** Tools that only read; a mapped path falls back to the main checkout when the worktree has no such file. */
+	const READ_ONLY = new Set(["read", "grep", "find", "ls", "read_text"]);
+	const remapRead = (name: string, path: unknown) => {
+		const mapped = remap(path);
+		if (!READ_ONLY.has(name) || mapped === path || !worktree || existsSync(String(mapped))) return mapped;
+		return path;
+	};
 	const needsWorktree = () => guarded && !worktree;
 	const inMainCheckout = (path: string) => Boolean(repo && checkoutRelative(resolve(sessionCwd, path.replace(/^@/, "")), repo.root) !== undefined);
 
@@ -101,7 +108,7 @@ export default function (pi: ExtensionAPI) {
 			exposure: options.exposure ?? template.exposure,
 			async execute(id, params, signal, onUpdate, ctx) {
 				const input = { ...params };
-				if ("path" in input && typeof input.path === "string") Object.assign(input, { path: remap(input.path) });
+				if ("path" in input && typeof input.path === "string") Object.assign(input, { path: remapRead(template.name, input.path) });
 				if ("paths" in input && Array.isArray(input.paths)) Object.assign(input, { paths: input.paths.map(remap) });
 				if ("input" in input && typeof input.input === "string" && repo && worktree) {
 					const { root } = repo;
@@ -259,7 +266,7 @@ const worktreeParams = Type.Object({
 				if (!input.name) throw new Error(`${input.action} needs a name.`);
 				const made = input.action === "create" ? await createWorktree(root, input.name) : await enterWorktree(root, input.name);
 				if (input.action === "create") await fastForwardMain(root, made.base);
-				return text(`Worktree ${made.path} on branch ${made.branch} (from ${made.base}). ${hint}`);
+				return text(`Worktree ${made.path} on branch ${made.branch} (from ${made.base} at ${made.commit}). ${hint}`);
 			}
 			case "remove": {
 				if (!input.name) throw new Error("remove with repo needs the branch name of the worktree.");
@@ -289,7 +296,7 @@ const worktreeParams = Type.Object({
 		name: "worktree",
 		label: "Worktree",
 		description:
-			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose branch is merged, the current one included, and those branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes in the main checkout are blocked until create or enter.",
+			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose work is merged, the current one and a detached one included, and their branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes in the main checkout are blocked until create or enter.",
 		promptSnippet: "Create, enter, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
 		parameters: worktreeParams,
 		exposure: "model-only",
@@ -315,7 +322,7 @@ const worktreeParams = Type.Object({
 					const next = input.action === "create" ? await createWorktree(root, input.name) : await enterWorktree(root, input.name);
 					switchTo(ctx, next);
 					if (input.action === "create") await fastForwardMain(root, next.base);
-					return text(`Now in worktree ${next.path} on branch ${next.branch} (from ${next.base}). All paths resolve there; the main checkout stays untouched.`);
+					return text(`Now in worktree ${next.path} on branch ${next.branch} (from ${next.base} at ${next.commit}). All paths resolve there; the main checkout stays untouched.`);
 				}
 				case "remove": {
 					if (!worktree) return text("No current worktree to remove.");

@@ -95,6 +95,8 @@ export interface Worktree {
 	path: string;
 	branch: string;
 	base: string;
+	/** The commit `base` resolved to when the worktree was made, abbreviated. */
+	commit: string;
 }
 
 /** Creates `.worktrees/<name>` on a new branch `<name>` from the default branch, without touching the main checkout. */
@@ -105,7 +107,8 @@ export async function createWorktree(root: string, name: string): Promise<Worktr
 	await git(root, "worktree", "add", "--quiet", "-b", branch, path, base);
 	await git(path, "branch", "--quiet", "--unset-upstream").catch(() => undefined);
 	await prepare(root, path);
-	return { path, branch, base };
+	const commit = await git(path, "rev-parse", "--short=12", "HEAD");
+	return { path, branch, base, commit };
 }
 
 interface Listed {
@@ -131,7 +134,7 @@ export async function ownWorktrees(root: string): Promise<Listed[]> {
 export async function enterWorktree(root: string, branch: string): Promise<Worktree> {
 	const existing = (await listWorktrees(root)).find((w) => w.branch === branch);
 	if (existing?.path === root) throw new Error(`${branch} is checked out in the main checkout; create a new branch instead.`);
-	if (existing) return { path: existing.path, branch, base: branch };
+	if (existing) return { path: existing.path, branch, base: branch, commit: await git(existing.path, "rev-parse", "--short=12", "HEAD") };
 	await tryGit(root, "fetch", "--quiet", "origin");
 	const local = (await tryGit(root, "rev-parse", "--verify", "-q", `refs/heads/${branch}`)) !== undefined;
 	if (!local && (await tryGit(root, "rev-parse", "--verify", "-q", `refs/remotes/origin/${branch}`)) === undefined)
@@ -141,7 +144,7 @@ export async function enterWorktree(root: string, branch: string): Promise<Workt
 	if (local) await git(root, "worktree", "add", "--quiet", path, branch);
 	else await git(root, "worktree", "add", "--quiet", "--track", "-b", branch, path, `origin/${branch}`);
 	await prepare(root, path);
-	return { path, branch, base: local ? branch : `origin/${branch}` };
+	return { path, branch, base: local ? branch : `origin/${branch}`, commit: await git(path, "rev-parse", "--short=12", "HEAD") };
 }
 
 /** Removes a worktree and keeps its branch. Returns a refusal instead when it has uncommitted changes and `force` is unset. */
@@ -152,9 +155,8 @@ export async function removeWorktree(root: string, path: string, force: boolean)
 	return undefined;
 }
 
-/** True when `tip` has commits off `base`'s first-parent line and one of those commits holds every file the branch changed as `tip` has it. */
-async function mergedInto(root: string, base: string, mainline: Set<string>, tip: string): Promise<boolean> {
-	if (mainline.has(tip)) return false;
+/** True when `tip` is already in `base`, by a merge or fast-forward, or its work is there by a squash or rebase. */
+async function mergedInto(root: string, base: string, tip: string): Promise<boolean> {
 	if ((await tryGit(root, "merge-base", "--is-ancestor", tip, base)) !== undefined) return true;
 	// A squash or rebase merge leaves the tip off base; the squash commit holds the branch's files as the tip has them.
 	// A merge test would miss a later commit that reverts part of the branch, and later edits on base would hide the squash.
@@ -171,19 +173,16 @@ async function mergedInto(root: string, base: string, mainline: Set<string>, tip
 	return false;
 }
 
-/** Removes clean worktrees, and their branches, whose work is merged into `base` by a merge, squash, or rebase. */
+/** Removes clean worktrees, and their branches, whose work is merged into `base`; a detached worktree loses only its checkout. */
 export async function pruneWorktrees(root: string, base: string): Promise<string[]> {
-	// An unused branch sits on base's first-parent line; it would look merged.
-	const mainline = new Set((await git(root, "rev-list", "--first-parent", base)).split("\n"));
 	const removed: string[] = [];
 	for (const w of await ownWorktrees(root)) {
-		if (!w.branch) continue;
-		const tip = await tryGit(root, "rev-parse", w.branch);
-		if (!tip || !(await mergedInto(root, base, mainline, tip))) continue;
+		const tip = await tryGit(w.path, "rev-parse", w.branch ?? "HEAD");
+		if (!tip || !(await mergedInto(root, base, tip))) continue;
 		if ((await tryGit(w.path, "status", "--porcelain")) !== "") continue;
 		await git(root, "worktree", "remove", w.path);
-		await tryGit(root, "branch", "-D", w.branch);
-		removed.push(`${w.path} (${w.branch} at ${tip.slice(0, 12)})`);
+		if (w.branch) await tryGit(root, "branch", "-D", w.branch);
+		removed.push(`${w.path} (${w.branch ?? "detached"} at ${tip.slice(0, 12)})`);
 	}
 	await tryGit(root, "worktree", "prune");
 	return removed;

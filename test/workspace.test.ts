@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { cacheUsable } from "../extensions/workspace/devshell.ts";
+import { cacheUsable, fromNulEnv } from "../extensions/workspace/devshell.ts";
 import workspace from "../extensions/workspace/index.ts";
 import { grepRoute, jobCommand, lastLines, progressBar, ttyCommand, ttyOutput, waitBound } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents, sessionDigest, sessionExists } from "../extensions/workspace/subagent.ts";
@@ -159,7 +159,7 @@ test("remove refuses a worktree with uncommitted changes and keeps the branch", 
 	execFileSync("git", ["rev-parse", "--verify", "refs/heads/rm"], { cwd: dir });
 });
 
-test("prune removes merged and squash-merged worktrees only, never unused, unmerged, extended, trimmed, dirty, or nested ones", async () => {
+test("prune removes merged, squash-merged, fast-forwarded, unused, and detached worktrees only, never unmerged, extended, dirty, or nested ones", async () => {
 	const dir = repo();
 	const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 	const commit = (cwd: string, file: string) => {
@@ -198,12 +198,28 @@ test("prune removes merged and squash-merged worktrees only, never unused, unmer
 	// A later edit on main to a squashed file makes a merge of the branch into main's tip conflict.
 	writeFileSync(join(dir, "s1"), "edited\n");
 	git(dir, "commit", "-qam", "edit s1");
+	// A branch fast-forwarded into main sits exactly on main's tip; that is still merged work.
+	const fastForwarded = await createWorktree(dir, "fast-forwarded");
+	commit(fastForwarded.path, "ff");
+	git(dir, "merge", "-q", "--ff-only", "fast-forwarded");
+	const detached = join(dir, ".worktrees", "detached");
+	git(dir, "worktree", "add", "-q", "--detach", detached, "main");
 	const tip = (branch: string) => git(dir, "rev-parse", "--short=12", branch).trim();
-	const tips = { merged: tip("merged"), squashed: tip("squashed") };
+	const detachedTip = git(detached, "rev-parse", "--short=12", "HEAD").trim();
+	const tips = { merged: tip("merged"), squashed: tip("squashed"), unused: tip("unused"), fastForwarded: tip("fast-forwarded") };
 	const removed = await pruneWorktrees(dir, "main");
-	assert.deepEqual(removed.sort(), [`${merged.path} (merged at ${tips.merged})`, `${squashed.path} (squashed at ${tips.squashed})`]);
-	for (const kept of [dirty.path, unmerged.path, unused.path, extended.path, trimmed.path, nested]) assert.equal(existsSync(kept), true);
-	assert.equal(git(dir, "branch", "--list", "merged", "squashed"), "");
+	assert.deepEqual(
+		removed.sort(),
+		[
+			`${merged.path} (merged at ${tips.merged})`,
+			`${squashed.path} (squashed at ${tips.squashed})`,
+			`${unused.path} (unused at ${tips.unused})`,
+			`${fastForwarded.path} (fast-forwarded at ${tips.fastForwarded})`,
+			`${detached} (detached at ${detachedTip})`,
+		].sort(),
+	);
+	for (const kept of [dirty.path, unmerged.path, extended.path, trimmed.path, nested]) assert.equal(existsSync(kept), true);
+	assert.equal(git(dir, "branch", "--list", "merged", "squashed", "unused", "fast-forwarded"), "");
 });
 
 test("a background job returns at the first matching line and keeps running", async () => {
@@ -220,6 +236,54 @@ test("a background job returns at the first matching line and keeps running", as
 	assert.match(first ?? "", /READY/);
 	assert.match(second ?? "", /killed/);
 	assert.ok(Date.now() - started < 4000);
+});
+
+test("killing a tty job kills the pty's own session, not only the outer shell", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "ws-tty-"));
+	const pidFile = join(dir, "child.pid");
+	const { session: s } = await session(dir, [
+		{ tool: "shell", args: { command: `trap '' HUP; echo $$ > '${pidFile}'; sleep 60`, background: true, tty: true, wait_seconds: 1 } },
+		{ tool: "shell", args: { action: "kill", job: "job1" } },
+	]);
+	await s.prompt("serve");
+	s.dispose();
+	const pid = Number(readFileSync(pidFile, "utf8").trim());
+	assert.ok(Number.isInteger(pid) && pid > 1, `no pid in ${pidFile}`);
+	assert.throws(() => process.kill(pid, 0), /ESRCH/);
+});
+
+test("an absolute cwd runs where it names, not in the worktree", async () => {
+	const dir = repo();
+	const { session: s } = await session(dir, [
+		{ tool: "worktree", args: { action: "create", name: "cwd" } },
+		{ tool: "bash", args: { command: "pwd", cwd: dir } },
+	]);
+	await s.prompt("check");
+	s.dispose();
+	assert.ok((toolResults(s).at(-1) ?? "").split("\n").includes(dir));
+});
+
+test("a read-only path falls back to the main checkout only when the worktree lacks it", async () => {
+	const dir = repo();
+	writeFileSync(join(dir, "main-only.txt"), "main\n");
+	const { session: s } = await session(dir, [
+		{ tool: "worktree", args: { action: "create", name: "read-main" } },
+		{ tool: "write", args: { path: "README", content: "worktree\n" } },
+		{ tool: "read", args: { path: join(dir, "README") } },
+		{ tool: "read", args: { path: join(dir, "main-only.txt") } },
+	]);
+	await s.prompt("read");
+	s.dispose();
+	const [mapped, fallback] = toolResults(s).slice(-2);
+	assert.match(mapped ?? "", /worktree/);
+	assert.match(fallback ?? "", /main/);
+});
+
+test("a devshell env from nix develop drops the shell's own variables", () => {
+	assert.deepEqual(fromNulEnv("PATH=/nix/store/x/bin\0PWD=/repo\0OLDPWD=/old\0SHLVL=2\0_=/bin/env\0NIX_CFLAGS_COMPILE= -frandom-seed=x\0"), {
+		PATH: "/nix/store/x/bin",
+		NIX_CFLAGS_COMPILE: " -frandom-seed=x",
+	});
 });
 
 test("tail reports truncated only when it left output out", () => {
