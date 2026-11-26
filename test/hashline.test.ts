@@ -27,6 +27,20 @@ async function run(dir: string, replies: (results: string[]) => Reply | undefine
 
 const tagOf = (readResult: string) => /^\[[^\]#]+#([0-9A-F]{4})\]/.exec(readResult)?.[1];
 
+test("a whole-file re-read of an unchanged file answers with a digest", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "hashline-")));
+	writeFileSync(join(dir, "f.txt"), "one\ntwo\n");
+	const results = await run(dir, (r): Reply | undefined => {
+		if (r.length === 0) return { tool: "read", args: { path: "f.txt" } };
+		if (r.length === 1) return { tool: "read", args: { path: "f.txt" } };
+		if (r.length === 2) return { tool: "read", args: { path: "f.txt", offset: 2 } };
+		return undefined;
+	});
+	assert.match(results[0] ?? "", /1:one/);
+	assert.match(results[1] ?? "", /unchanged since this session's last full read \(2 lines\)/);
+	assert.match(results[2] ?? "", /2:two/);
+});
+
 test("read tags a file and edit applies a patch anchored on that tag", async () => {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "hashline-")));
 	writeFileSync(join(dir, "f.txt"), "one\ntwo\nthree\n");
