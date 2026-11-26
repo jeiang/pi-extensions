@@ -19,8 +19,8 @@
         npmDeps = pkgs.importNpmLock {npmRoot = ./.;};
         inherit (pkgs.importNpmLock) npmConfigHook;
         npmBuildScript = "check";
-        # The grep tests run pi's grep, which needs rg on PATH.
-        nativeBuildInputs = [pkgs.git pkgs.bun pkgs.ripgrep];
+        # The grep and find tests run pi's grep and find, which need rg and fd on PATH.
+        nativeBuildInputs = [pkgs.git pkgs.bun pkgs.ripgrep pkgs.fd];
         preBuild = "export HOME=$TMPDIR";
         installPhase = ''
           runHook preInstall
