@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
 import { type AgentToolResult, type ExtensionAPI, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
+import { lastCheckpoint } from "../checkpoint/index.ts";
 import { addUsage } from "../footer/cost.ts";
 import { untilInterrupt } from "./interrupt.ts";
 
@@ -78,6 +79,66 @@ export function childArgs(agent: Agent, task: string, sessionDir: string | undef
 /** Whether `dir` holds the transcript of child session `id`; pi names it `<timestamp>_<id>.jsonl`. */
 export function sessionExists(dir: string, id: string): boolean {
 	return existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(`_${id}.jsonl`));
+}
+
+/** A session entry, as far as the digest reads it. */
+interface Entry {
+	type: string;
+	customType?: string;
+	data?: unknown;
+	message?: { role?: string; content?: unknown };
+}
+
+const textOf = (content: unknown): string =>
+	typeof content === "string"
+		? content
+		: Array.isArray(content)
+			? content.flatMap((part) => (part && typeof part === "object" && "text" in part && typeof part.text === "string" ? [part.text] : [])).join("\n")
+			: "";
+
+const callsOf = (content: unknown): { name: string; input: Record<string, unknown> }[] =>
+	Array.isArray(content)
+		? content.flatMap((part) =>
+				part && typeof part === "object" && (part.type === "toolCall" || part.type === "tool-call" || part.type === "tool_use")
+					? [{ name: String(part.name ?? "?"), input: (part.input ?? part.arguments ?? {}) as Record<string, unknown> }]
+					: [],
+			)
+		: [];
+
+const pathsOf = (input: Record<string, unknown>): string[] => [
+	...(typeof input.path === "string" ? [input.path] : []),
+	...(Array.isArray(input.paths) ? input.paths.filter((path): path is string => typeof path === "string") : []),
+	...(typeof input.input === "string" ? [...input.input.matchAll(/\[([^\]#\n]+)#/g)].map((match) => match[1] ?? "") : []),
+];
+
+const clip = (text: string, limit: number) => {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
+};
+
+/** Where the session stands, for a child that cannot see its transcript. */
+export function sessionDigest(entries: Entry[], question: string): string {
+	const parts: string[] = [];
+	const checkpoint = lastCheckpoint({ getBranch: () => entries });
+	if (checkpoint) parts.push(`Checkpoint:\n${checkpoint.state}`);
+	const requests = entries.flatMap((entry) => (entry.type === "message" && entry.message?.role === "user" ? [textOf(entry.message.content)] : [])).filter(Boolean);
+	if (requests.length > 0) parts.push(`Last request from the user:\n${clip(requests.at(-1) ?? "", 600)}`);
+	const calls = entries.flatMap((entry) => (entry.type === "message" && entry.message?.role === "assistant" ? callsOf(entry.message.content) : []));
+	if (calls.length > 0) {
+		parts.push(
+			`Recent tool calls:\n${calls
+				.slice(-12)
+				.map((call) => {
+					const summary = [call.input.command, call.input.pattern, pathsOf(call.input)[0], call.input.op, call.input.action].find((value) => typeof value === "string");
+					return `${call.name} ${clip(String(summary ?? JSON.stringify(call.input)), 100)}`;
+				})
+				.join("\n")}`,
+		);
+	}
+	const files = [...new Set(calls.flatMap((call) => pathsOf(call.input)))].slice(-15);
+	if (files.length > 0) parts.push(`Files touched:\n${files.join("\n")}`);
+	parts.push(`Answer this from the working directory. You cannot see the session's transcript.\n\n${question}`);
+	return parts.join("\n\n");
 }
 
 interface Child {
@@ -206,6 +267,11 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			Type.String({ description: "Session id of an earlier child of the same agent, to continue it with its transcript instead of starting fresh." }),
 		),
 		background: Type.Optional(Type.Boolean({ description: "Return at once; you are woken with the result." })),
+		briefs: Type.Optional(
+			Type.Array(Type.Object({ agent: Type.String(), task: Type.String() }), {
+				description: "Several children in one call, each at most maxConcurrent at a time; returns one section per brief and fails if any child failed.",
+			}),
+		),
 	});
 	const outputSchema = Type.Object({
 		agent: Type.String(),
@@ -230,11 +296,37 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, make several calls in one message, or Promise.all in a script; at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background. A failed or aborted child names its session; pass that id as resume, with the same agent, to continue it where it stopped. Scripts get { agent, status, answer, session }.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
+		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, pass briefs in one call (or make several calls, or Promise.all in a script); at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background. A failed or aborted child names its session; pass that id as resume, with the same agent, to continue it where it stopped. Scripts get { agent, status, answer, session }.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
 		promptSnippet: `Delegate to a read-only child agent (${agents.map((agent) => agent.name).join(", ")})`,
 		parameters: params,
 		outputSchema,
 		async execute(id, input: Static<typeof params>, signal, onUpdate, ctx) {
+			if (input.briefs?.length) {
+				const sessionFile = ctx.sessionManager.getSessionFile();
+				const sessionDir = sessionFile ? join(ctx.sessionManager.getSessionDir(), "subagents", ctx.sessionManager.getSessionId()) : undefined;
+				const results = await Promise.all(
+					input.briefs.map(async (brief) => {
+						const found = agents.find((candidate) => candidate.name === brief.agent);
+						if (!found) throw new Error(`No agent "${brief.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
+						const session = randomUUID();
+						const outcome = await run(found, brief.task, sessionDir, session, signal);
+						return {
+							failed: outcome.failed,
+							usage: outcome.usage,
+							text: `${outcome.failed ? "FAILED" : "DONE"} ${brief.agent} (session ${session}):\n${outcome.text}`,
+						};
+					}),
+				);
+				const answer = results.map((result) => result.text).join("\n\n");
+				const failed = results.some((result) => result.failed);
+				return {
+					content: [{ type: "text" as const, text: answer }],
+					details: undefined,
+					isError: failed,
+					usage: results.reduce<Usage | undefined>((total, result) => addUsage(total, result.usage), undefined),
+					structuredContent: { agent: "fan-out", status: failed ? "failed" : "done", answer, session: "" },
+				};
+			}
 			const agent = agents.find((candidate) => candidate.name === input.agent);
 			if (!agent) throw new Error(`No agent "${input.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
 			const task = input.task?.trim() || (input.resume ? "You were interrupted mid-task. Continue from where you stopped and give your final answer." : "");
@@ -284,6 +376,24 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			}
 			const running = [...children.values()].map((child) => `${child.id} ${child.agent}`).join(", ") || "none";
 			ctx.ui.notify(`Subagents: at most ${limit} at once; running: ${running}; waiting: ${waiting.length}`, "info");
+		},
+	});
+
+	pi.registerCommand("btw", {
+		description: "Ask a side question about this session's state. It runs on a small model in a throwaway session, and nothing it reads or says enters this conversation.",
+		handler: async (args, ctx) => {
+			const question = args.trim();
+			if (!question) return ctx.ui.notify("Usage: /btw <question>", "error");
+			const scout = agents.find((candidate) => candidate.name === "btw");
+			if (!scout) return ctx.ui.notify("No btw agent in the agents directory.", "error");
+			ctx.ui.setStatus("btw", "thinking");
+			try {
+				const outcome = await run(scout, sessionDigest(ctx.sessionManager.getBranch() as Entry[], question), undefined, randomUUID(), undefined);
+				pi.appendEntry("btw", { question, answer: outcome.text });
+				ctx.ui.notify(outcome.text, outcome.failed ? "error" : "info");
+			} finally {
+				ctx.ui.setStatus("btw", undefined);
+			}
 		},
 	});
 }
