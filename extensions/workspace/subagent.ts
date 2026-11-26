@@ -11,6 +11,7 @@ import { addUsage } from "../footer/cost.ts";
 import { untilInterrupt } from "./interrupt.ts";
 
 const DEFAULT_MAX_CONCURRENT = 3;
+const DEFAULT_TIMEOUT_S = 30 * 60;
 const STDERR_TAIL_LINES = 20;
 
 export interface Agent {
@@ -111,10 +112,16 @@ const pathsOf = (input: Record<string, unknown>): string[] => [
 	...(typeof input.input === "string" ? [...input.input.matchAll(/\[([^\]#\n]+)#/g)].map((match) => match[1] ?? "") : []),
 ];
 
+/** The argument that names what a tool call was about, for one line of a digest. */
+const summaryOf = (input: Record<string, unknown>): string | undefined =>
+	[input.command, input.pattern, pathsOf(input)[0], input.op, input.action].find((value) => typeof value === "string");
+
 const clip = (text: string, limit: number) => {
 	const flat = text.replace(/\s+/g, " ").trim();
 	return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
 };
+
+const elapsed = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`);
 
 /** Where the session stands, for a child that cannot see its transcript. */
 export function sessionDigest(entries: Entry[], question: string): string {
@@ -129,7 +136,7 @@ export function sessionDigest(entries: Entry[], question: string): string {
 			`Recent tool calls:\n${calls
 				.slice(-12)
 				.map((call) => {
-					const summary = [call.input.command, call.input.pattern, pathsOf(call.input)[0], call.input.op, call.input.action].find((value) => typeof value === "string");
+					const summary = summaryOf(call.input);
 					return `${call.name} ${clip(String(summary ?? JSON.stringify(call.input)), 100)}`;
 				})
 				.join("\n")}`,
@@ -141,9 +148,40 @@ export function sessionDigest(entries: Entry[], question: string): string {
 	return parts.join("\n\n");
 }
 
+/** What child session `id` did, from its transcript: the last assistant text, tool calls, and results. */
+export function sessionTail(dir: string, id: string, limit = 20): string[] {
+	if (!existsSync(dir)) return [];
+	const file = readdirSync(dir).find((name) => name.endsWith(`_${id}.jsonl`));
+	if (!file) return [];
+	const out: string[] = [];
+	for (const line of readFileSync(join(dir, file), "utf8").split("\n")) {
+		let entry: Entry;
+		try {
+			entry = JSON.parse(line) as Entry;
+		} catch {
+			continue;
+		}
+		const message = entry.message;
+		if (entry.type !== "message" || !message) continue;
+		if (message.role === "assistant") {
+			const text = clip(textOf(message.content), 200);
+			if (text) out.push(`say ${text}`);
+			for (const call of callsOf(message.content)) out.push(`${call.name} ${clip(String(summaryOf(call.input) ?? JSON.stringify(call.input)), 140)}`);
+		} else if (message.role === "toolResult") {
+			const text = clip(textOf(message.content), 160);
+			if (text) out.push(`  → ${text}`);
+		}
+	}
+	return out.slice(-Math.max(1, limit));
+}
+
 interface Child {
 	id: string;
 	agent: string;
+	session: string;
+	started: number;
+	/** The last progress lines this child reported. */
+	progress: string[];
 	kill: () => void;
 }
 
@@ -157,8 +195,9 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	if (agents.length === 0) return;
 
 	const configFile = join(getAgentDir(), "subagent.json");
-	const config = existsSync(configFile) ? (JSON.parse(readFileSync(configFile, "utf8")) as { maxConcurrent?: number }) : {};
+	const config = existsSync(configFile) ? (JSON.parse(readFileSync(configFile, "utf8")) as { maxConcurrent?: number; timeoutSeconds?: number }) : {};
 	let limit = config.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+	const timeoutSeconds = config.timeoutSeconds && config.timeoutSeconds > 0 ? config.timeoutSeconds : DEFAULT_TIMEOUT_S;
 	let active = 0;
 	let next = 1;
 	const waiting: (() => void)[] = [];
@@ -180,7 +219,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		waiting.shift()?.();
 	};
 
-	/** Runs one child to its end. `text` is its final answer, or on failure the reason, the stderr tail, and the session to resume; `usage` sums the child's model calls. */
+	/** Runs one child to its end. `text` is its final answer, or on failure the reason, what it last did, and the session to resume; `usage` sums its model calls. */
 	const run = async (
 		agent: Agent,
 		task: string,
@@ -188,16 +227,27 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 		session: string,
 		signal: AbortSignal | undefined,
 		onProgress?: (line: string) => void,
+		timeout = timeoutSeconds,
 	): Promise<{ text: string; failed: boolean; usage?: Usage }> => {
 		await acquire();
 		const id = `sub${next++}`;
+		let timer: NodeJS.Timeout | undefined;
 		try {
 			if (signal?.aborted) throw new Error("Cancelled before the child started.");
 			const cwd = options.cwd();
 			const child = spawn("pi", childArgs(agent, task, sessionDir, session), { cwd, env: await options.env(cwd), stdio: ["ignore", "pipe", "pipe"] });
 			const kill = () => void child.kill("SIGTERM");
-			children.set(id, { id, agent: agent.name, kill });
+			const record: Child = { id, agent: agent.name, session, started: Date.now(), progress: [], kill };
+			children.set(id, record);
 			signal?.addEventListener("abort", kill, { once: true });
+			let timedOut = false;
+			if (timeout > 0) {
+				timer = setTimeout(() => {
+					timedOut = true;
+					record.progress.push(`${agent.name}: no result after ${elapsed(timeout * 1000)}; stopping`);
+					kill();
+				}, timeout * 1000);
+			}
 
 			let answer = "";
 			let stop = "";
@@ -216,7 +266,12 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 					} catch {
 						continue;
 					}
-					if (event.type === "tool_execution_start") onProgress?.(`${agent.name}: ${++tools} tool calls, now ${event.toolName ?? "?"}`);
+					if (event.type === "tool_execution_start") {
+						const line = `${agent.name}: ${++tools} tool calls, now ${event.toolName ?? "?"}`;
+						record.progress.push(line);
+						if (record.progress.length > 20) record.progress.shift();
+						onProgress?.(line);
+					}
 					if (event.type !== "message_end" || event.message?.role !== "assistant") continue;
 					usage = addUsage(usage, event.message.usage);
 					const parts = Array.isArray(event.message.content) ? (event.message.content as { type?: string; text?: string }[]) : [];
@@ -234,11 +289,13 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			const exit = await exited.promise;
 			signal?.removeEventListener("abort", kill);
 			if (!exit && answer && stop !== "error" && stop !== "aborted") return { text: answer, failed: false, usage };
-			const reason = [exit, stop === "error" || stop === "aborted" ? `model ${stop}` : "", !answer ? "no answer" : ""].filter(Boolean).join(", ");
+			const failure = timedOut ? `timed out after ${timeout}s` : exit;
+			const reason = [failure, stop === "error" || stop === "aborted" ? `model ${stop}` : "", !answer ? "no answer" : ""].filter(Boolean).join(", ");
 			const text = [
 				`${agent.name} failed (${reason}).`,
 				error,
 				stderr.trim() && `stderr:\n${stderr.trim()}`,
+				record.progress.length > 0 && `Last activity:\n${record.progress.slice(-3).join("\n")}`,
 				// The child's transcript outlives the failure; its id is the handle to continue it.
 				sessionDir && `session ${session}; resume it with { agent: "${agent.name}", resume: "${session}" }`,
 			]
@@ -246,6 +303,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 				.join("\n");
 			return { text, failed: true, usage };
 		} finally {
+			clearTimeout(timer);
 			children.delete(id);
 			release();
 		}
@@ -259,7 +317,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	});
 
 	const params = Type.Object({
-		agent: Type.String({ description: `One of: ${agents.map((agent) => agent.name).join(", ")}.` }),
+		agent: Type.Optional(Type.String({ description: `One of: ${agents.map((agent) => agent.name).join(", ")}.` })),
 		task: Type.Optional(
 			Type.String({ description: "The whole assignment: the question, the file paths and facts you already have, and what to return. Leave it out when resume is given." }),
 		),
@@ -272,17 +330,24 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 				description: "Several children in one call, each at most maxConcurrent at a time; returns one section per brief and fails if any child failed.",
 			}),
 		),
+		action: Type.Optional(
+			Type.Union([Type.Literal("status"), Type.Literal("kill")], {
+				description: "status: list running children, or with session show that child's progress and transcript tail. kill: stop a running child by session.",
+			}),
+		),
+		session: Type.Optional(Type.String({ description: "status, kill: the child session id from its launch or a previous status." })),
+		timeout: Type.Optional(Type.Number({ description: `Seconds before a child is stopped; 0 disables it. Default ${timeoutSeconds}.` })),
 	});
 	const outputSchema = Type.Object({
 		agent: Type.String(),
-		status: Type.String({ description: "done, failed, or background (you are woken with the result later)" }),
-		answer: Type.String({ description: "The child's final answer, or why it failed." }),
+		status: Type.String({ description: "done, failed, running, or background (you are woken with the result later)" }),
+		answer: Type.String({ description: "The child's final answer, why it failed, or its progress." }),
 		session: Type.String({ description: "The child's session id; pass it back as resume to continue that child." }),
 	});
 	const text = (
 		value: string,
 		agent: string,
-		status: "done" | "failed" | "background",
+		status: "done" | "failed" | "running" | "background",
 		session: string,
 		usage?: Usage,
 	): AgentToolResult<undefined> & { structuredContent: Static<typeof outputSchema> } => ({
@@ -296,20 +361,40 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, pass briefs in one call (or make several calls, or Promise.all in a script); at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background. A failed or aborted child names its session; pass that id as resume, with the same agent, to continue it where it stopped. Scripts get { agent, status, answer, session }.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
+		description: `Run one read-only child agent in this session's directory and get its final answer. Children never edit files. Put the file paths and facts you already have in the task. The child starts with the project instructions and nothing else. For several children, pass briefs in one call (or make several calls, or Promise.all in a script); at most ${limit} run at once and the rest wait. If the user interrupts, a running child moves to the background. A failed, timed-out, or aborted child names its session and what it last did; pass the session as resume, with the same agent, to continue it where it stopped. A child is stopped after ${timeoutSeconds}s (pass timeout: 0 to disable), so a stuck one wakes you instead of holding a slot. status lists running children, or with session shows a child's progress and transcript tail; kill stops one by session. Scripts get { agent, status, answer, session }.\nAgents:\n${agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n")}`,
 		promptSnippet: `Delegate to a read-only child agent (${agents.map((agent) => agent.name).join(", ")})`,
 		parameters: params,
 		outputSchema,
 		async execute(id, input: Static<typeof params>, signal, onUpdate, ctx) {
+			const sessionFile = ctx.sessionManager.getSessionFile();
+			const sessionDir = sessionFile ? join(ctx.sessionManager.getSessionDir(), "subagents", ctx.sessionManager.getSessionId()) : undefined;
+			const running = [...children.values()];
+			if (input.action === "kill") {
+				if (!input.session) throw new Error("kill needs the child's session id; status lists them.");
+				const target = running.find((child) => child.session === input.session);
+				if (!target) throw new Error(`No running child session ${input.session}.`);
+				target.kill();
+				return text(`Stopping ${target.agent} (session ${input.session}); its failure wakes you with what it last did and the session to resume.`, target.agent, "done", input.session);
+			}
+			if (input.action === "status") {
+				if (!input.session) {
+					const rows = running.map((child) => `${child.id} ${child.agent} session ${child.session} ${elapsed(Date.now() - child.started)}: ${child.progress.at(-1) ?? "starting"}`);
+					return text(rows.join("\n") || "No subagents running.", "", "done", "");
+				}
+				const child = running.find((entry) => entry.session === input.session);
+				const tail = sessionDir ? sessionTail(sessionDir, input.session) : [];
+				const head = child
+					? `${child.agent} ${child.id} running ${elapsed(Date.now() - child.started)}: ${child.progress.at(-1) ?? "starting"}`
+					: `No running child for session ${input.session}; its transcript's last activity:`;
+				return text([head, tail.length > 0 ? tail.join("\n") : "(no transcript for this session)"].join("\n"), child?.agent ?? "", child ? "running" : "done", input.session);
+			}
 			if (input.briefs?.length) {
-				const sessionFile = ctx.sessionManager.getSessionFile();
-				const sessionDir = sessionFile ? join(ctx.sessionManager.getSessionDir(), "subagents", ctx.sessionManager.getSessionId()) : undefined;
 				const results = await Promise.all(
 					input.briefs.map(async (brief) => {
 						const found = agents.find((candidate) => candidate.name === brief.agent);
 						if (!found) throw new Error(`No agent "${brief.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
 						const session = randomUUID();
-						const outcome = await run(found, brief.task, sessionDir, session, signal);
+						const outcome = await run(found, brief.task, sessionDir, session, signal, undefined, input.timeout);
 						return {
 							failed: outcome.failed,
 							usage: outcome.usage,
@@ -327,12 +412,11 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 					structuredContent: { agent: "fan-out", status: failed ? "failed" : "done", answer, session: "" },
 				};
 			}
+			if (!input.agent) throw new Error(`subagent needs an agent; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
 			const agent = agents.find((candidate) => candidate.name === input.agent);
 			if (!agent) throw new Error(`No agent "${input.agent}"; known: ${agents.map((candidate) => candidate.name).join(", ")}.`);
 			const task = input.task?.trim() || (input.resume ? "You were interrupted mid-task. Continue from where you stopped and give your final answer." : "");
 			if (!task) throw new Error("subagent needs a task, unless resume names a session to continue.");
-			const sessionFile = ctx.sessionManager.getSessionFile();
-			const sessionDir = sessionFile ? join(ctx.sessionManager.getSessionDir(), "subagents", ctx.sessionManager.getSessionId()) : undefined;
 			if (input.resume && !(sessionDir && sessionExists(sessionDir, input.resume)))
 				throw new Error(`No child session ${input.resume} to resume; children live in ${sessionDir ?? "no directory, because this session is unsaved"}.`);
 			const session = input.resume ?? randomUUID();
@@ -347,18 +431,23 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			};
 			if (input.background) {
 				// A background child outlives the tool call, so the call's signal does not cancel it.
-				report(run(agent, task, sessionDir, session, undefined));
-				return text(`Launched ${agent.name} in the background as session ${session}; you are woken with its result or its failure.`, agent.name, "background", session);
+				report(run(agent, task, sessionDir, session, undefined, undefined, input.timeout));
+				return text(
+					`Launched ${agent.name} in the background as session ${session}; status with { action: "status", session: "${session}" } shows what it is doing, kill stops it, and you are woken with its result or failure.`,
+					agent.name,
+					"background",
+					session,
+				);
 			}
 			const outcome = await untilInterrupt(id, signal, (childSignal, attached) =>
 				run(agent, task, sessionDir, session, childSignal, (line) => {
 					if (attached()) onUpdate?.({ content: [{ type: "text", text: line }], details: undefined });
-				}),
+				}, input.timeout),
 			);
 			if ("value" in outcome) return text(outcome.value.text, agent.name, outcome.value.failed ? "failed" : "done", session, outcome.value.usage);
 			report(outcome.background);
 			return text(
-				`The user interrupted; ${agent.name} moved to the background as session ${session} and you are woken with its result or its failure.`,
+				`The user interrupted; ${agent.name} moved to the background as session ${session}. status with { action: "status", session: "${session}" } shows what it is doing, kill stops it, and you are woken with its result or failure.`,
 				agent.name,
 				"background",
 				session,
@@ -374,8 +463,8 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 				limit = wanted;
 				for (const resume of waiting.splice(0)) resume();
 			}
-			const running = [...children.values()].map((child) => `${child.id} ${child.agent}`).join(", ") || "none";
-			ctx.ui.notify(`Subagents: at most ${limit} at once; running: ${running}; waiting: ${waiting.length}`, "info");
+			const running = [...children.values()].map((child) => `${child.id} ${child.agent} ${child.session} ${elapsed(Date.now() - child.started)}: ${child.progress.at(-1) ?? "starting"}`).join("\n") || "none";
+			ctx.ui.notify(`Subagents: at most ${limit} at once, timeout ${timeoutSeconds}s; running:\n${running}\nwaiting: ${waiting.length}`, "info");
 		},
 	});
 
@@ -388,7 +477,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (!scout) return ctx.ui.notify("No btw agent in the agents directory.", "error");
 			ctx.ui.setStatus("btw", "thinking");
 			try {
-				const outcome = await run(scout, sessionDigest(ctx.sessionManager.getBranch() as Entry[], question), undefined, randomUUID(), undefined);
+				const outcome = await run(scout, sessionDigest(ctx.sessionManager.getBranch() as Entry[], question), undefined, randomUUID(), undefined, undefined, 120);
 				pi.appendEntry("btw", { question, answer: outcome.text });
 				ctx.ui.notify(outcome.text, outcome.failed ? "error" : "info");
 			} finally {

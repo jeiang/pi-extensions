@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { cacheUsable, fromNulEnv } from "../extensions/workspace/devshell.ts";
 import workspace from "../extensions/workspace/index.ts";
 import { grepRoute, jobCommand, lastLines, progressBar, ttyCommand, ttyOutput, waitBound } from "../extensions/workspace/shell.ts";
-import { childArgs, loadAgents, sessionDigest, sessionExists } from "../extensions/workspace/subagent.ts";
+import { childArgs, loadAgents, sessionDigest, sessionExists, sessionTail } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -298,6 +298,20 @@ test("grepRoute serves plain rg and grep calls only", () => {
 	assert.equal(grepRoute("grep foo"), undefined);
 	assert.equal(grepRoute("rg --json foo"), undefined);
 	assert.equal(grepRoute("rg $PAT"), undefined);
+});
+
+test("a child's transcript tail shows its last text, tool calls, and results", () => {
+	const dir = mkdtempSync(join(tmpdir(), "ws-tail-"));
+	const id = "0190-tail";
+	writeFileSync(
+		join(dir, `2026-01-01T00-00-00-000Z_${id}.jsonl`),
+		[
+			JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Looking at the parser." }, { type: "toolCall", name: "read", input: { path: "src/a.ts" } }] } }),
+			JSON.stringify({ type: "message", message: { role: "toolResult", content: [{ type: "text", text: "export function a() {}" }] } }),
+		].join("\n"),
+	);
+	assert.deepEqual(sessionTail(dir, id), ["say Looking at the parser.", "read src/a.ts", "  → export function a() {}"]);
+	assert.deepEqual(sessionTail(dir, "missing"), []);
 });
 
 test("remapPath follows a symlinked alias of the checkout but not a symlinked file inside it", () => {
