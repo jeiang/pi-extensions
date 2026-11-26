@@ -18,7 +18,7 @@ import { structuredGrep } from "./grep.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerInterrupt } from "./interrupt.ts";
 import { readTextTool, structuredFind, structuredLs } from "./listing.ts";
-import { cwdParam, registerShell } from "./shell.ts";
+import { cwdParam, registerShell, ttyParam } from "./shell.ts";
 import { registerSsh } from "./ssh.ts";
 import { registerSubagent } from "./subagent.ts";
 import { substituteTool } from "./substitute.ts";
@@ -147,6 +147,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			...bashTemplate.parameters.properties,
 			cwd: cwdParam,
+			tty: ttyParam,
 			tail: Type.Optional(Type.Number({ description: "Return only the last N lines; the full output stays in the log file named in `log`." })),
 		}),
 		execute: (_id, params, signal, onUpdate) => shell.bash(params, signal, onUpdate),

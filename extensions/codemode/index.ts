@@ -35,7 +35,7 @@ function prelude(spill: string): string {
 }
 
 const HELPERS = `Helpers defined in every script:
-- run(cmd, { cwd, tail, timeout }) → { output, stderr, exit_code, log, truncated }, also for a non-zero exit; output is stdout up to 1 MiB and the log holds both streams. run(cmd).json() parses stdout, run(cmd).jsonErr() parses stderr. sh(cmd, { check = true, ... }) → output, throws on a non-zero exit. json(cmd, opts) → run(cmd).json().
+- run(cmd, { cwd, tail, timeout, tty }) → { output, stderr, exit_code, log, truncated }, also for a non-zero exit; output is stdout up to 1 MiB and the log holds both streams. run(cmd).json() parses stdout, run(cmd).jsonErr() parses stderr. \`tty: true\` gives the command a pty (stdout and stderr then arrive merged), for a program that refuses without a terminal. sh(cmd, { check = true, ... }) → output, throws on a non-zero exit. json(cmd, opts) → run(cmd).json().
 - fs: text(path) → raw file text; rows(path, from = 1, count = 200) → numbered window; write(path, content); glob(pattern); ls(path) → names.
 - Text: lines(text) · page(text, from, count) · count(items, key?) → sorted [value, n] · unique · sum · median · p95.
 - put(key, value) / get(key): JSON state across scripts. Above 64 KiB it spills to a file and returns that path; load()/store() stay for small values.
