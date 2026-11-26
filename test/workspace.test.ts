@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { grepRoute, lastLines, progressBar, ttyCommand, ttyOutput, waitBound } from "../extensions/workspace/shell.ts";
+import { grepRoute, jobCommand, lastLines, progressBar, ttyCommand, ttyOutput, waitBound } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents, sessionDigest, sessionExists } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
@@ -310,6 +310,12 @@ test("a pty's EOF marker and CRLF leave the output", () => {
 	assert.equal(ttyOutput("50%\r100%\r\n"), "50%\r100%\n");
 });
 
+test("a pty job keeps the stderr redirect inside the pty", () => {
+	const plain = jobCommand("ls", "/tmp/e", false);
+	assert.equal(plain, "{ ls\n} 2> '/tmp/e'");
+	// The same redirect, inside script(1), so stderr never reaches the pty stream.
+	assert.equal(jobCommand("ls", "/tmp/e", true), ttyCommand(plain));
+});
 test("a wait with no selector is bounded, and a selector is not", () => {
 	assert.equal(waitBound({}), 120);
 	assert.equal(waitBound({}), 120);

@@ -32,6 +32,11 @@ export function ttyCommand(command: string, platform: NodeJS.Platform = process.
 export function ttyOutput(text: string): string {
 	return text.replace(/\^D\x08\x08/g, "").replace(/\r\n/g, "\n");
 }
+/** The command as the shell runs it: stderr to its own file, so stdout alone stays parseable, under a pty when asked. */
+export function jobCommand(command: string, errFile: string, tty: boolean): string {
+	const wrapped = `{ ${command}\n} 2> ${quotePath(errFile)}`;
+	return tty ? ttyCommand(wrapped) : wrapped;
+}
 const MAX_WAKES = 5;
 /** pi's limit on the `output` codemode scripts get from `bash`. */
 const STRUCTURED_MAX_BYTES = 1024 * 1024;
@@ -65,7 +70,7 @@ export const cwdParam = Type.Optional(
 export const ttyParam = Type.Optional(
 	Type.Boolean({
 		description:
-			"Run under a pty, so a program that checks for a terminal works (`sudo` can prompt, progress output renders). stdout and stderr arrive merged, with line endings normalized; the log is still complete.",
+			"Run under a pty, so a program that checks for a terminal works (`sudo` can prompt, progress output renders). stdout and stdin are the terminal, with line endings normalized; stderr stays apart, and the log holds both.",
 	}),
 );
 
@@ -260,7 +265,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		const env = await options.env(cwd);
 		const devshellError = options.devshellError(cwd);
 		writeFileSync(log, devshellError ? `[shell] devshell failed, ran without it:\n${devshellError}\n` : "");
-		// stderr goes to its own file, so a command's JSON on stdout is not polluted by progress output.
+		// stderr goes to its own file, inside the pty too, so a command's JSON on stdout stays parseable.
 		const errFile = join(logDir, `${process.pid}-${id}.err`);
 		writeFileSync(errFile, "");
 		const controller = new AbortController();
@@ -274,7 +279,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		};
 		const job: Job = { id, command: label, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, done: Promise.resolve() };
 		job.done = ops
-			.exec(tty ? ttyCommand(command) : `{ ${command}\n} 2> ${quotePath(errFile)}`, cwd, {
+			.exec(jobCommand(command, errFile, tty), cwd, {
 				signal: controller.signal,
 				env: { ...env, PYTHONUNBUFFERED: "1" },
 				onData: (data) => {
