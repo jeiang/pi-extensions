@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { grepRoute, lastLines, progressBar, waitBound } from "../extensions/workspace/shell.ts";
+import { grepRoute, lastLines, progressBar, ttyCommand, waitBound } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents, sessionDigest, sessionExists } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
@@ -297,6 +297,11 @@ test("the digest tells a throwaway child where the session stands", () => {
 	assert.match(digest, /shell bun test/);
 	assert.match(digest, /Files touched:\nsrc\/a\.ts/);
 	assert.match(digest, /is the parser wired\?$/);
+});
+
+test("the tty wrapper differs by platform and quotes the command", () => {
+	assert.equal(ttyCommand("sudo true", "darwin"), "script -q /dev/null bash -c 'sudo true'");
+	assert.equal(ttyCommand("sudo true", "linux"), "script -qec 'sudo true' /dev/null");
 });
 
 test("a wait with no selector is bounded, and a selector is not", () => {

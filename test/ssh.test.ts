@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
-import { quote, remoteCommand, sshOptions } from "../extensions/workspace/ssh.ts";
+import { connectionFlags, quote, remoteCommand, sessionFlags, sshOptions } from "../extensions/workspace/ssh.ts";
 
 const bash = (script: string) => execFileSync("bash", ["-c", script], { encoding: "utf8" });
 
@@ -14,6 +14,15 @@ test("option values and commands reach ssh as single arguments, never as local s
 		assert.throws(() => sshOptions({ [key]: "brew install x" }), /runs local programs/, key);
 	}
 	assert.throws(() => sshOptions({ "User=x -oProxyCommand": "y" }), /Not an ssh option name/);
+});
+
+test("a key and a port belong to the connection, a pty and stdin to the session", () => {
+	assert.deepEqual(connectionFlags({ identity: "~/.ssh/id_ed25519", port: 2222, agentForward: true }), ["-i", "~/.ssh/id_ed25519", "-p", "2222", "-A"]);
+	assert.deepEqual(connectionFlags({}), []);
+	assert.deepEqual(sessionFlags({ tty: true }), ["-t"]);
+	assert.deepEqual(sessionFlags({ noStdin: true }), ["-n"]);
+	// A pty and "never read stdin" contradict each other; the pty is what sudo needs.
+	assert.deepEqual(sessionFlags({ tty: true, noStdin: true }), ["-t"]);
 });
 
 test("the remote command runs its script unchanged under bash, from the given directory", () => {

@@ -23,6 +23,11 @@ const TAIL_LINES = 30;
 /** A shell command's stderr is captured separately, so a JSON payload on stdout stays parseable. */
 const STDERR_MAX_BYTES = 256 * 1024;
 const quotePath = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
+/** The command under a pty, so a program that insists on a terminal (sudo) can prompt. */
+export function ttyCommand(command: string, platform: NodeJS.Platform = process.platform): string {
+	return platform === "darwin" ? `script -q /dev/null bash -c ${quotePath(command)}` : `script -qec ${quotePath(command)} /dev/null`;
+}
 const MAX_WAKES = 5;
 /** pi's limit on the `output` codemode scripts get from `bash`. */
 const STRUCTURED_MAX_BYTES = 1024 * 1024;
@@ -65,6 +70,9 @@ const params = Type.Object({
 	wait_seconds: Type.Optional(Type.Number({ description: "Return after this many seconds even if the job still runs." })),
 	tail: Type.Optional(
 		Type.Number({ description: "Return only the last N lines of output. The full output stays in the log file named in the result; read or grep it instead of piping into tail, head, or grep." }),
+	),
+	tty: Type.Optional(
+		Type.Boolean({ description: "Run under a pty, so sudo can prompt and progress output renders. stdout and stderr arrive merged; the log is still complete." }),
 	),
 	action: Type.Optional(
 		Type.Union([Type.Literal("status"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("kill")], {
@@ -235,7 +243,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 	};
 
 	/** `label` stands in for `command` in summaries, for a command that is not worth reading. */
-	const start = async (command: string, cwd: string, label = command): Promise<Job> => {
+	const start = async (command: string, cwd: string, label = command, tty = false): Promise<Job> => {
 		mkdirSync(logDir, { recursive: true });
 		const id = `job${next++}`;
 		const log = join(logDir, `${process.pid}-${id}.log`);
@@ -256,7 +264,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		};
 		const job: Job = { id, command: label, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, done: Promise.resolve() };
 		job.done = ops
-			.exec(`{ ${command}\n} 2> ${quotePath(errFile)}`, cwd, {
+			.exec(tty ? ttyCommand(command) : `{ ${command}\n} 2> ${quotePath(errFile)}`, cwd, {
 				signal: controller.signal,
 				env: { ...env, PYTHONUNBUFFERED: "1" },
 				onData: (data) => {
@@ -363,11 +371,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 
 	/** The codemode `bash` tool: pi's result shape, run as a job. */
 	const bash = async (
-		input: { command: string; timeout?: number; cwd?: string; tail?: number; label?: string },
+		input: { command: string; timeout?: number; cwd?: string; tail?: number; label?: string; tty?: boolean },
 		signal: AbortSignal | undefined,
 		onUpdate: AgentToolUpdateCallback<undefined> | undefined,
 	) => {
-		const job = await start(input.command, dirOf(input.cwd), input.label);
+		const job = await start(input.command, dirOf(input.cwd), input.label, input.tty);
 		const unfollow = follow(job, onUpdate);
 		const why = await waitFor(job, undefined, input.timeout, signal);
 		unfollow();
@@ -455,7 +463,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 					return { ...text(`${shown}\nlog: ${log}`), structuredContent: { status: "exited", exit_code: 0, log, output: shown } };
 				}
 			}
-			const job = await start(input.command, cwd);
+			const job = await start(input.command, cwd, input.command, input.tty);
 			if (input.background && !pattern && input.wait_seconds === undefined) {
 				reportExit(job);
 				return { ...text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`), structuredContent: shape(job, "") };
