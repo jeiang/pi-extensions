@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import workspace from "../extensions/workspace/index.ts";
-import { grepRoute, lastLines, progressBar } from "../extensions/workspace/shell.ts";
+import { grepRoute, lastLines, progressBar, waitBound } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents, sessionExists } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
@@ -273,6 +273,14 @@ test("a child session is found by the id pi put in its transcript's name", () =>
 	assert.equal(sessionExists(dir, "0190-abc"), true);
 	assert.equal(sessionExists(dir, "0190-ab"), false);
 	assert.equal(sessionExists(join(dir, "absent"), "0190-abc"), false);
+});
+
+test("a wait with no selector is bounded, and a selector is not", () => {
+	assert.equal(waitBound({}), 120);
+	assert.equal(waitBound({}), 120);
+	assert.equal(waitBound({ wait_seconds: 5 }), 5);
+	assert.equal(waitBound({ wait_on: "READY" }), undefined);
+	assert.equal(waitBound({ wait_on: "READY", wait_seconds: 5 }), 5);
 });
 
 test("progressBar reads build steps and percentages", () => {

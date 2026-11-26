@@ -12,6 +12,13 @@ import {
 import { type Static, Type } from "typebox";
 
 const DEFAULT_TIMEOUT_S = 120;
+/** A wait with no bound of its own returns after this many seconds; the job keeps running. */
+const DEFAULT_WAIT_S = 120;
+
+/** Seconds to wait for a job: the caller's bound, else the fallback when no pattern can end the wait. */
+export function waitBound(input: { wait_on?: string; wait_seconds?: number }, fallback = DEFAULT_WAIT_S): number | undefined {
+	return input.wait_seconds ?? (input.wait_on ? undefined : fallback);
+}
 const TAIL_LINES = 30;
 const MAX_WAKES = 5;
 /** pi's limit on the `output` codemode scripts get from `bash`. */
@@ -55,7 +62,7 @@ const params = Type.Object({
 	),
 	action: Type.Optional(
 		Type.Union([Type.Literal("status"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("kill")], {
-			description: "Act on jobs instead of running a command: status lists jobs; read returns new output; wait blocks like wait_on/wait_seconds or until exit; kill stops it.",
+			description: "Act on jobs instead of running a command: status lists jobs; read returns new output; wait returns on wait_on, wait_seconds, or the job's exit, and otherwise after 120s with the job still running; kill stops it.",
 		}),
 	),
 	job: Type.Optional(Type.String({ description: "Job id for read, wait, kill." })),
@@ -372,6 +379,25 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return { ...result, structuredContent };
 	};
 
+	/** Starts a job and returns within `seconds`: its result when it exits, otherwise a background job that wakes the session. */
+	const waitStart = async (
+		command: string,
+		input: { seconds: number; label?: string; tail?: number; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<undefined> },
+	) => {
+		const job = await start(command, dirOf(), input.label);
+		const unfollow = follow(job, input.onUpdate);
+		const why = await waitFor(job, undefined, input.seconds, input.signal);
+		unfollow();
+		if (why === "exit") return finished(job, input.tail);
+		if (why === "abort") {
+			job.controller.abort();
+			await job.done;
+			return progress(job, "Cancelled.", input.tail);
+		}
+		reportExit(job);
+		return progress(job, `Still running after ${input.seconds}s; moved to the background.`, input.tail);
+	};
+
 	pi.registerTool({
 		name: "shell",
 		label: "Shell",
@@ -393,8 +419,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			if (input.action === "read") return progress(findJob(input.job), "New output:", input.tail);
 			if (input.action === "wait") {
 				const job = findJob(input.job);
-				const why = await waitFor(job, pattern, input.wait_seconds, signal);
-				return progress(job, `Wait ended: ${why}.`, input.tail);
+				// An unbounded wait is a turn that never returns; without a selector, bound it and let the job run on.
+				const seconds = waitBound(input);
+				const why = await waitFor(job, pattern, seconds, signal);
+				const note = why === "time" ? `Still running after ${seconds}s; wait again or keep working.` : `Wait ended: ${why}.`;
+				return progress(job, note, input.tail);
 			}
 			if (!input.command) throw new Error("command is required");
 			const cwd = dirOf(input.cwd);
@@ -439,5 +468,5 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return { ...text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`), structuredContent: shape(job, "") };
 	};
 
-	return { bash, background, env: options.env, dirOf };
+	return { bash, background, waitStart, env: options.env, dirOf };
 }
