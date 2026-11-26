@@ -68,18 +68,31 @@ function fingerprint(root: string, files: string[]): string {
 	return hash.digest("hex").slice(0, 32);
 }
 
+/**
+ * A cache entry written before `nix-collect-garbage` names store paths that are gone, and every command in it
+ * then fails as "command not found", so such an entry is a miss to resolve again.
+ */
+export function cacheUsable(env: Env): boolean {
+	return (env.PATH ?? "")
+		.split(":")
+		.filter((entry) => entry.startsWith("/nix/store/"))
+		.every((entry) => existsSync(entry));
+}
+
 async function cached(key: string, load: () => Promise<Env>): Promise<Env> {
 	const file = join(cacheDir(), `${key}.json`);
 	try {
-		return JSON.parse(readFileSync(file, "utf8")) as Env;
+		const env = JSON.parse(readFileSync(file, "utf8")) as Env;
+		if (cacheUsable(env)) return env;
 	} catch {
-		const env = await load();
-		// A devshell's exports can carry credentials, and an entry written before this keeps its old mode.
-		mkdirSync(cacheDir(), { recursive: true, mode: 0o700 });
-		writeFileSync(file, JSON.stringify(env), { mode: 0o600 });
-		chmodSync(file, 0o600);
-		return env;
+		// A missing or unreadable entry is a miss.
 	}
+	const env = await load();
+	// A devshell's exports can carry credentials, and an entry written before this keeps its old mode.
+	mkdirSync(cacheDir(), { recursive: true, mode: 0o700 });
+	writeFileSync(file, JSON.stringify(env), { mode: 0o600 });
+	chmodSync(file, 0o600);
+	return env;
 }
 
 interface DevEnvJson {

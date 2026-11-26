@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { cacheUsable } from "../extensions/workspace/devshell.ts";
 import workspace from "../extensions/workspace/index.ts";
 import { grepRoute, jobCommand, lastLines, progressBar, ttyCommand, ttyOutput, waitBound } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents, sessionDigest, sessionExists } from "../extensions/workspace/subagent.ts";
@@ -344,4 +345,9 @@ test("a carriage-return progress line updates in place in the live view", async 
 	assert.equal(views.at(-1), "start\n100%\ndone");
 	assert.ok(views.some((view) => view.startsWith("start\n50%\n█")), views.join("\n---\n"));
 	assert.match(toolResults(s)[0] ?? "", /10%\r50%\r100%\ndone/);
+});
+
+test("a cached devshell that names a store path the store lost is a miss", () => {
+	assert.equal(cacheUsable({ PATH: "/usr/bin:/bin" }), true);
+	assert.equal(cacheUsable({ PATH: "/nix/store/00000000000000000000000000000000-gone/bin" }), false);
 });
