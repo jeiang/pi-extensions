@@ -70,11 +70,27 @@ function windows(input: Static<typeof readParams>, total: number): [number, numb
 	return [[start, Math.min(total, start + wanted - 1)]];
 }
 
-/** Text for the model: whole-file snapshot tag in the header, `N:` numbered rows of the requested windows, `…` between them. */
-export async function hashlineRead(store: EditStore, cwd: string, input: Static<typeof readParams>): Promise<string> {
+const lineCount = (text: string) => (text.endsWith("\n") ? text.slice(0, -1).split("\n").length : text.split("\n").length);
+
+/**
+ * Text for the model: whole-file snapshot tag in the header, `N:` numbered rows of the requested windows, `…` between them.
+ * A whole-file read whose content is unchanged since this session's last whole-file read returns the header and a digest instead;
+ * the earlier rows are still recorded as seen, so an edit anchored on the tag stays valid.
+ */
+export async function hashlineRead(
+	store: EditStore,
+	cwd: string,
+	input: Static<typeof readParams>,
+	fullReads?: Map<string, string>,
+): Promise<string> {
 	const absolute = resolve(cwd, input.path.replace(/^@/, ""));
 	const text = (await readFile(absolute, "utf8")).replace(/\r\n?/g, "\n");
 	const tag = store.recordSnapshot(absolute, text);
+	const whole = !input.ranges?.length && input.offset === undefined && input.limit === undefined;
+	if (whole && fullReads?.get(absolute) === tag) {
+		return `${hashlineFormatHeader(displayPath(absolute, cwd), tag)}\nunchanged since this session's last full read (${lineCount(text)} lines). Edit against this tag, or pass offset/limit to see part of it again.`;
+	}
+	if (whole) fullReads?.set(absolute, tag);
 	const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
 	const parts: string[] = [];
 	let shownLines = 0;
@@ -173,27 +189,52 @@ async function applyEditNow(store: EditStore, cwd: string, mode: "hashline" | "r
 }
 type EditDetails = { diff: string; firstChangedLine?: number };
 
+/** The header a fresh read would give the model, for an edit that failed because the file moved under it. */
+async function freshHeaders(store: EditStore, cwd: string, paths: string[]): Promise<string> {
+	const headers: string[] = [];
+	for (const absolute of paths) {
+		let text: string;
+		try {
+			text = (await readFile(absolute, "utf8")).replace(/\r\n?/g, "\n");
+		} catch {
+			continue;
+		}
+		headers.push(`${hashlineFormatHeader(displayPath(absolute, cwd), store.recordSnapshot(absolute, text))} (${lineCount(text)} lines)`);
+	}
+	return headers.length > 0 ? `Now: ${headers.join(", ")}. Reissue the patch with that tag.` : "";
+}
+
 /** Serialized on the files it names, so two calls on one file cannot interleave their read and write. */
-async function applyEdit(store: EditStore, cwd: string, mode: "hashline" | "replace", input: Record<string, unknown>) {
-	const work = () => applyEditNow(store, cwd, mode, input);
+async function applyEdit(store: EditStore, cwd: string, mode: "hashline" | "replace", input: Record<string, unknown>, recover?: () => Promise<string>) {
+	const work = async () => {
+		try {
+			return await applyEditNow(store, cwd, mode, input);
+		} catch (error) {
+			// The turn the model would spend re-reading is the one this saves; the tag in the message is already recorded.
+			const hint = recover ? await recover().catch(() => "") : "";
+			throw hint ? new Error(`${(error as Error).message}\n${hint}`) : error;
+		}
+	};
 	const targets = patchTargets(cwd, mode, input);
 	return targets.length > 0 ? withFileLocks(targets, work) : work();
 }
 
 export function hashlineTools(store: EditStore) {
 	const description = editDescription("hashline");
+	/** The tag of each file's last whole-file read, so a repeat read can answer with a digest. */
+	const fullReads = new Map<string, string>();
 	return {
 		read: (cwd: string): ToolDefinition<typeof readParams, ReadToolDetails | undefined> => {
 			const builtin = createReadToolDefinition(cwd);
 			return {
 				...builtin,
 				parameters: readParams,
-				description: `${builtin.description}\n\nText files come back as a \`[path#TAG]\` header and \`N:\` numbered rows; edit anchors on both.`,
+				description: `${builtin.description}\n\nText files come back as a \`[path#TAG]\` header and \`N:\` numbered rows; edit anchors on both. A whole-file re-read of a file that has not changed answers with the header and a digest instead of the rows.`,
 				async execute(id, input, signal, onUpdate, ctx: ExtensionToolContext) {
 					const absolute = resolve(cwd, input.path.replace(/^@/, ""));
 					const info = await stat(absolute);
 					if (IMAGE.test(extname(absolute)) || info.isDirectory()) return builtin.execute(id, input, signal, onUpdate, ctx);
-					return { content: [{ type: "text", text: await hashlineRead(store, cwd, input) }], details: undefined };
+					return { content: [{ type: "text", text: await hashlineRead(store, cwd, input, fullReads) }], details: undefined };
 				},
 			};
 		},
@@ -203,7 +244,7 @@ export function hashlineTools(store: EditStore) {
 			description,
 			promptSnippet: "Edit files with hashline patches anchored on read tags",
 			parameters: editParams,
-			execute: (_id, input) => applyEdit(store, cwd, "hashline", input),
+			execute: (_id, input) => applyEdit(store, cwd, "hashline", input, () => freshHeaders(store, cwd, patchTargets(cwd, "hashline", input))),
 			renderCall(args, theme) {
 				const header = /\[([^\]#]+)#/.exec(args.input ?? "")?.[1] ?? "";
 				return new Text(`${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", header)}`, 0, 0);
@@ -221,7 +262,7 @@ export function hashlineTools(store: EditStore) {
 				"Replace exact text in one file, without line numbers. old_string must match exactly once (whitespace included) unless replace_all; read the file first. Use instead of sed -i or a python heredoc for a text replacement.",
 			promptSnippet: "Replace exact text in a file (instead of sed -i)",
 			parameters: replaceParams,
-			execute: (_id, input) => applyEdit(store, cwd, "replace", input),
+			execute: (_id, input) => applyEdit(store, cwd, "replace", input, () => freshHeaders(store, cwd, patchTargets(cwd, "replace", input))),
 			renderCall(args, theme) {
 				return new Text(`${theme.fg("toolTitle", theme.bold("replace"))} ${theme.fg("accent", args.path ?? "")}`, 0, 0);
 			},
