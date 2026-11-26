@@ -9,6 +9,8 @@ import type { registerShell } from "./shell.ts";
 
 const exec = promisify(execFile);
 const DEFAULT_OPTIONS: Record<string, string> = { BatchMode: "yes", ConnectTimeout: "10" };
+/** A remote command still running after this many seconds returns as a background job instead of holding the turn. */
+const DEFAULT_WAIT_S = 120;
 /** The tool owns connection sharing; a caller's value would break it. */
 const OWNED = new Set(["controlmaster", "controlpath", "controlpersist"]);
 /** They run local programs or load local code, out of the guards' sight, or replace the command. */
@@ -25,7 +27,7 @@ const params = Type.Object({
 			description: "ssh -o options, e.g. { User: \"deploy\", ProxyJump: \"edge\", ConnectTimeout: 5 }. Defaults: BatchMode yes, ConnectTimeout 10.",
 		}),
 	),
-	timeout: Type.Optional(Type.Number({ description: "Seconds before the command is killed (no default)." })),
+	timeout: Type.Optional(Type.Number({ description: `Seconds before the call returns with the command still running in the background (default ${DEFAULT_WAIT_S}); it is not killed.` })),
 	tail: Type.Optional(Type.Number({ description: "Return only the last N lines; the full output stays in the log file named in `log`." })),
 	background: Type.Optional(Type.Boolean({ description: "Start as a background shell job; tools.shell reads, waits on, or kills it." })),
 });
@@ -125,7 +127,7 @@ export function registerSsh(pi: ExtensionAPI, shell: Shell) {
 				.join(" ");
 			const label = `ssh ${input.host}${input.cwd ? ` (in ${input.cwd})` : ""}: ${input.command}`;
 			if (input.background) return shell.background(command, label);
-			return shell.bash({ command, timeout: input.timeout, tail: input.tail, label }, signal, onUpdate);
+			return shell.waitStart(command, { seconds: input.timeout ?? DEFAULT_WAIT_S, label, tail: input.tail, signal, onUpdate });
 		},
 	});
 }

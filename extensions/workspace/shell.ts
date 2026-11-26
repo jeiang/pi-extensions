@@ -12,7 +12,17 @@ import {
 import { type Static, Type } from "typebox";
 
 const DEFAULT_TIMEOUT_S = 120;
+/** A wait with no bound of its own returns after this many seconds; the job keeps running. */
+const DEFAULT_WAIT_S = 120;
+
+/** Seconds to wait for a job: the caller's bound, else the fallback when no pattern can end the wait. */
+export function waitBound(input: { wait_on?: string; wait_seconds?: number }, fallback = DEFAULT_WAIT_S): number | undefined {
+	return input.wait_seconds ?? (input.wait_on ? undefined : fallback);
+}
 const TAIL_LINES = 30;
+/** A shell command's stderr is captured separately, so a JSON payload on stdout stays parseable. */
+const STDERR_MAX_BYTES = 256 * 1024;
+const quotePath = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 const MAX_WAKES = 5;
 /** pi's limit on the `output` codemode scripts get from `bash`. */
 const STRUCTURED_MAX_BYTES = 1024 * 1024;
@@ -28,6 +38,9 @@ interface Job {
 	controller: AbortController;
 	/** Byte offset `read` has returned up to. */
 	cursor: number;
+	/** Standard output alone, and standard error alone; the log holds both. */
+	stdout?: string;
+	stderr?: string;
 	/** `overwrite`: the line replaces the one before it, as after a carriage return. */
 	listeners: Set<(line: string, overwrite: boolean) => void>;
 	done: Promise<void>;
@@ -55,7 +68,7 @@ const params = Type.Object({
 	),
 	action: Type.Optional(
 		Type.Union([Type.Literal("status"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("kill")], {
-			description: "Act on jobs instead of running a command: status lists jobs; read returns new output; wait blocks like wait_on/wait_seconds or until exit; kill stops it.",
+			description: "Act on jobs instead of running a command: status lists jobs; read returns new output; wait returns on wait_on, wait_seconds, or the job's exit, and otherwise after 120s with the job still running; kill stops it.",
 		}),
 	),
 	job: Type.Optional(Type.String({ description: "Job id for read, wait, kill." })),
@@ -74,7 +87,8 @@ export const shellOutputSchema = Type.Object({
 	status: Type.Optional(Type.String({ description: "running, exited, killed, or failed" })),
 	exit_code: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
 	log: Type.Optional(Type.String({ description: "The full output; read or grep it." })),
-	output: Type.String({ description: "The output shown, or for action status the job summaries." }),
+	output: Type.String({ description: "stdout shown, or for action status the job summaries." }),
+	stderr: Type.Optional(Type.String({ description: "stderr alone, which the log also holds after the stdout." })),
 });
 type ShellResult = Static<typeof shellOutputSchema>;
 
@@ -196,6 +210,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		...(job.exitCode !== undefined ? { exit_code: job.exitCode } : {}),
 		log: job.log,
 		output,
+		...(job.stderr ? { stderr: job.stderr.slice(-STDERR_MAX_BYTES) } : {}),
 	});
 	/** The exit result of a foreground command; the job is done and forgotten. */
 	const finished = (job: Job, lines?: number) => {
@@ -227,6 +242,9 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		const env = await options.env(cwd);
 		const devshellError = options.devshellError(cwd);
 		writeFileSync(log, devshellError ? `[shell] devshell failed, ran without it:\n${devshellError}\n` : "");
+		// stderr goes to its own file, so a command's JSON on stdout is not polluted by progress output.
+		const errFile = join(logDir, `${process.pid}-${id}.err`);
+		writeFileSync(errFile, "");
 		const controller = new AbortController();
 		const listeners: Job["listeners"] = new Set();
 		let partial = "";
@@ -238,7 +256,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		};
 		const job: Job = { id, command: label, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, done: Promise.resolve() };
 		job.done = ops
-			.exec(command, cwd, {
+			.exec(`{ ${command}\n} 2> ${quotePath(errFile)}`, cwd, {
 				signal: controller.signal,
 				env: { ...env, PYTHONUNBUFFERED: "1" },
 				onData: (data) => {
@@ -263,6 +281,10 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			})
 			.finally(() => {
 				job.ended = Date.now();
+				// The log holds both streams for reading later; the two fields keep them apart for parsing.
+				job.stdout = existsSync(log) ? readFileSync(log, "utf8") : "";
+				job.stderr = existsSync(errFile) ? readFileSync(errFile, "utf8") : "";
+				if (job.stderr.trim()) appendFileSync(log, `\n[stderr]\n${job.stderr}`);
 				if (partial) emit(partial.replace(/\r$/, ""));
 			});
 		jobs.set(id, job);
@@ -358,11 +380,12 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		}
 		const result = finished(job, input.tail);
 		if (job.status !== "exited" || job.exitCode == null) throw new Error(result.content[0]?.text);
-		const log = readLog(job);
+		const stdout = job.stdout ?? readLog(job);
 		// `tail` is the agent's own cut; truncated says whether this output left out any of the log.
-		const shown = input.tail === undefined ? truncateTail(log, { maxBytes: STRUCTURED_MAX_BYTES, maxLines: Number.MAX_SAFE_INTEGER }) : lastLines(log, input.tail);
+		const shown = input.tail === undefined ? truncateTail(stdout, { maxBytes: STRUCTURED_MAX_BYTES, maxLines: Number.MAX_SAFE_INTEGER }) : lastLines(stdout, input.tail);
 		const structuredContent = {
 			output: shown.content,
+			stderr: (job.stderr ?? "").slice(-STDERR_MAX_BYTES),
 			truncated: shown.truncated,
 			...(shown.truncated ? { full_output_path: job.log } : {}),
 			log: job.log,
@@ -372,11 +395,30 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return { ...result, structuredContent };
 	};
 
+	/** Starts a job and returns within `seconds`: its result when it exits, otherwise a background job that wakes the session. */
+	const waitStart = async (
+		command: string,
+		input: { seconds: number; label?: string; tail?: number; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<undefined> },
+	) => {
+		const job = await start(command, dirOf(), input.label);
+		const unfollow = follow(job, input.onUpdate);
+		const why = await waitFor(job, undefined, input.seconds, input.signal);
+		unfollow();
+		if (why === "exit") return finished(job, input.tail);
+		if (why === "abort") {
+			job.controller.abort();
+			await job.done;
+			return progress(job, "Cancelled.", input.tail);
+		}
+		reportExit(job);
+		return progress(job, `Still running after ${input.seconds}s; moved to the background.`, input.tail);
+	};
+
 	pi.registerTool({
 		name: "shell",
 		label: "Shell",
 		description:
-			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. A foreground command still running after `timeout` moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Every result names the log file holding the full output: pass `tail` for the end, then read (offset/limit) or grep the log instead of piping into tail, head, or grep. Scripts get { job, status, exit_code, log, output }; for one foreground command, run() is simpler.",
+			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. stdout and stderr are captured separately, so a JSON payload on stdout stays parseable; progress output goes to stderr. A foreground command still running after `timeout` moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Every result names the log file holding both streams; pass `tail` for the end, then read (offset/limit) the log. Scripts get { job, status, exit_code, log, output, stderr }; for one foreground command, run() is simpler.",
 		promptSnippet: "Run processes (builds, tests, git, nix, ssh); background jobs with early return",
 		exposure: "codemode",
 		parameters: params,
@@ -393,8 +435,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			if (input.action === "read") return progress(findJob(input.job), "New output:", input.tail);
 			if (input.action === "wait") {
 				const job = findJob(input.job);
-				const why = await waitFor(job, pattern, input.wait_seconds, signal);
-				return progress(job, `Wait ended: ${why}.`, input.tail);
+				// An unbounded wait is a turn that never returns; without a selector, bound it and let the job run on.
+				const seconds = waitBound(input);
+				const why = await waitFor(job, pattern, seconds, signal);
+				const note = why === "time" ? `Still running after ${seconds}s; wait again or keep working.` : `Wait ended: ${why}.`;
+				return progress(job, note, input.tail);
 			}
 			if (!input.command) throw new Error("command is required");
 			const cwd = dirOf(input.cwd);
@@ -439,5 +484,5 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return { ...text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`), structuredContent: shape(job, "") };
 	};
 
-	return { bash, background, env: options.env, dirOf };
+	return { bash, background, waitStart, env: options.env, dirOf };
 }
