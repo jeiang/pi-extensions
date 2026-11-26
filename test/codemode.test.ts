@@ -48,16 +48,25 @@ test("json() finds the JSON when progress lines came first", async () => {
 	assert.match(ok.result, /Script completed[\s\S]*parsed/);
 });
 
-test("fs, the text helpers, and put() work without shell text tools", async () => {
+test("fs writes a file and reads back a window of it", async () => {
 	const ok = await script(`await fs.write("notes.txt", "one\\ntwo\\nthree\\n");
-const rows = await fs.rows("notes.txt", 1, 2);
+return (await fs.rows("notes.txt", 1, 2)).includes("2:");`);
+	assert.match(ok.result, /Script completed[\s\S]*\ntrue/);
+});
+
+test("fs reads a file's raw text and lists the working tree", async () => {
+	const ok = await script(`await fs.write("notes.txt", "one\\ntwo\\nthree\\n");
 const names = lines(await fs.text("notes.txt"));
-await put("small", { n: 2 });
+return [names.length, (await fs.glob("*.txt")).length];`);
+	assert.match(ok.result, /\[3,\s*1\]/);
+});
+
+test("the text helpers count, and put() refuses a large value in an unsaved session", async () => {
+	const ok = await script(`await put("small", { n: 2 });
+const grouped = count(lines("a\\nb\\na"));
 const blob = await put("big", { text: "a".repeat(70000) }).then(() => "stored", (e) => e.message.includes("nowhere to spill"));
-const grouped = count(names);
-return [rows.includes("2:"), names.length, grouped.length, grouped[0][1], median([1, 2, 3, 4]), (await fs.glob("*.txt")).length, (await get("small")).n, blob];`);
-	assert.match(ok.result, /Script completed/);
-	assert.match(ok.result, /true,\s*3,\s*3,\s*1,\s*2\.5,\s*1,\s*2,\s*true/);
+return [grouped[0][0], grouped.length, median([1, 2, 3, 4]), (await get("small")).n, blob];`);
+	assert.match(ok.result, /\["a",\s*2,\s*2\.5,\s*2,\s*true\]/);
 });
 
 test("stdout and stderr stay apart, so .json() parses and .jsonErr() sees the other stream", async () => {
