@@ -365,7 +365,7 @@ test("the digest tells a throwaway child where the session stands", () => {
 });
 
 test("the tty wrapper differs by platform and quotes the command", () => {
-	assert.equal(ttyCommand("sudo true", "darwin"), "script -q /dev/null bash -c 'sudo true'");
+	assert.equal(ttyCommand("sudo true", "darwin"), "/usr/bin/script -q /dev/null bash -c 'sudo true'");
 	assert.equal(ttyCommand("sudo true", "linux"), "script -qec 'sudo true' /dev/null");
 });
 

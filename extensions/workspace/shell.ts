@@ -27,7 +27,7 @@ const quotePath = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 /** The command under a pty, so a program that insists on a terminal (sudo) can prompt. The inner shell writes its pid, which is its session's id too. */
 export function ttyCommand(command: string, platform: NodeJS.Platform = process.platform, pidFile?: string): string {
 	const inner = pidFile ? `echo $$ > ${quotePath(pidFile)}; ${command}` : command;
-	return platform === "darwin" ? `script -q /dev/null bash -c ${quotePath(inner)}` : `script -qec ${quotePath(inner)} /dev/null`;
+	return platform === "darwin" ? `/usr/bin/script -q /dev/null bash -c ${quotePath(inner)}` : `script -qec ${quotePath(inner)} /dev/null`;
 }
 /** A pty prints `^D` for the end of the caller's stdin and turns every newline into CRLF; neither belongs in the log. */
 export function ttyOutput(text: string): string {
