@@ -15,8 +15,6 @@ const PATH_TOOLS: Record<string, true> = { read: true, read_text: true, write: t
 
 const INSTALL = "Permanent installs are not allowed. Use `nix shell nixpkgs#<pkg> -c <cmd>` or `nix run`, or add the tool to the repository's devshell.";
 const HISTORY = "Rewriting git history needs the user's explicit request.";
-const PIPED =
-	"Piping output into tail, head, or grep keeps only part of it, and the log then holds only that part. Drop the pipe: pass tail: N for the end, then read the log named in the result (offset/limit, negative offset for the end) or grep it.";
 
 export const COMMAND_RULES: Rule[] = [
 	{ pattern: /\b(brew|port)\s+install\b/, reason: INSTALL },
@@ -36,9 +34,6 @@ export const COMMAND_RULES: Rule[] = [
 
 const SWITCH =
 	"Switching branches moves the checkout the session works in. Use the worktree tool: enter for an existing branch, create for a new one. To read another revision use git show, diff, or log <rev>; to build or test one, git worktree add --detach <dir> <rev> and work there.";
-
-/** Habits with a better tool: blocked with the redirect at once, never put to the user. */
-export const HABIT_RULES: Rule[] = [{ pattern: /2>&1\s*\|\s*(tail|head|grep)\b/, reason: PIPED }];
 
 /** `command` without heredoc bodies and quoted strings, so text that only mentions a command does not count. */
 export function unquoted(command: string): string {
@@ -69,10 +64,6 @@ const SECRETS: RegExp[] = [
 
 export function commandViolation(command: string): string | undefined {
 	return COMMAND_RULES.find((rule) => rule.pattern.test(command))?.reason;
-}
-
-export function commandHabit(command: string): string | undefined {
-	return HABIT_RULES.find((rule) => rule.pattern.test(command))?.reason;
 }
 
 const expand = (path: string) => (path.startsWith("~/") ? `${homedir()}${path.slice(1)}` : path);
@@ -137,8 +128,6 @@ export default function (pi: ExtensionAPI) {
 		const input = event.input as Record<string, unknown>;
 		if (COMMAND_TOOLS[event.toolName] && typeof input.command === "string") {
 			const command = input.command;
-			const habit = commandHabit(command);
-			if (habit) return { block: true, reason: habit };
 			if (!enabled) return;
 			const violation = commandViolation(command);
 			if (violation && !(await allow(ctx, "Allow blocked command?", `${violation}\n\n${command}`))) {

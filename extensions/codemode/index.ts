@@ -12,9 +12,10 @@ const DEFAULT_TIMEOUT_MS = 15 * 60_000;
 function prelude(spill: string): string {
 	return [
 		`const SPILL = ${JSON.stringify(spill)};`,
-		"const run = (command, o = {}) => tools.bash({ command, ...o });",
-		"const sh = async (command, { check = true, ...o } = {}) => { const r = await run(command, o); if (check && r.exit_code !== 0) throw new Error(`exit ${r.exit_code}: ${command}\\n${r.output.slice(-2000)}\\nlog: ${r.log}`); return r.output; };",
-		"const json = async (command, o) => { const out = await sh(command, o); const at = Math.min(...[out.indexOf('{'), out.indexOf('[')].filter((n) => n >= 0)); for (const t of [out, out.slice(at)]) { try { return JSON.parse(t); } catch {} } throw new Error(`no JSON in the output of ${command}:\\n${out.slice(0, 500)}`); };",
+		"const parse = (text) => { const s = String(text ?? ''); const at = Math.min(...[s.indexOf('{'), s.indexOf('[')].filter((n) => n >= 0)); if (at < 0) throw new Error(`no JSON in: ${s.slice(0, 200)}`); return JSON.parse(s.slice(at)); };",
+		"const run = async (command, o = {}) => { const r = await tools.bash({ command, ...o }); r.json = () => parse(r.output); r.jsonErr = () => parse(r.stderr); return r; };",
+		"const sh = async (command, { check = true, ...o } = {}) => { const r = await run(command, o); if (check && r.exit_code !== 0) throw new Error(`exit ${r.exit_code}: ${command}\\n${(r.output + (r.stderr ? `\\n${r.stderr}` : '')).slice(-2000)}\\nlog: ${r.log}`); return r.output; };",
+		"const json = async (command, o) => (await run(command, o)).json();",
 		"const settle = async (list) => (await Promise.allSettled(list)).map((x) => (x.status === 'fulfilled' ? x.value : `Error: ${x.reason?.message ?? x.reason}`));",
 		"const sleep = (seconds) => tools.sleep({ seconds });",
 		"const poll = async (fn, { every = 15, timeout = 600 } = {}) => { const end = Date.now() + timeout * 1000; for (;;) { const v = await fn(); if (v) return v; if (Date.now() + every * 1000 > end) throw new Error(`poll timed out after ${timeout}s`); await sleep(every); } };",
@@ -34,7 +35,7 @@ function prelude(spill: string): string {
 }
 
 const HELPERS = `Helpers defined in every script:
-- run(cmd, { cwd, tail, timeout }) → { output, exit_code, log, truncated }, also for a non-zero exit; output holds up to 1 MiB. sh(cmd, { check = true, ... }) → output, throws on a non-zero exit. json(cmd, opts) → parsed output.
+- run(cmd, { cwd, tail, timeout }) → { output, stderr, exit_code, log, truncated }, also for a non-zero exit; output is stdout up to 1 MiB and the log holds both streams. run(cmd).json() parses stdout, run(cmd).jsonErr() parses stderr. sh(cmd, { check = true, ... }) → output, throws on a non-zero exit. json(cmd, opts) → run(cmd).json().
 - fs: text(path) → raw file text; rows(path, from = 1, count = 200) → numbered window; write(path, content); glob(pattern); ls(path) → names.
 - Text: lines(text) · page(text, from, count) · count(items, key?) → sorted [value, n] · unique · sum · median · p95.
 - put(key, value) / get(key): JSON state across scripts. Above 64 KiB it spills to a file and returns that path; load()/store() stay for small values.
@@ -45,7 +46,7 @@ A first line \`// @background\` runs the whole script in the background: the cal
 
 The script is the program; a command runs one external program:
 - One program per run(). Independent commands go in separate calls under settle(), so each keeps its own exit code and output and one failure does not hide the rest.
-- Filter, count, sort, and join in JS, not with \`;\` chains or pipes into head, tail, grep, sort, awk, or jq. Prefer a command's --json output with json().
+- Filter, count, sort, and join in JS, not with \`;\` chains or pipes into head, tail, grep, sort, awk, or jq. For a --json command, reach for .json()/json().
 - Keep intermediate results in variables, or in put()/get() across scripts.
 - Declared tools work here too. Use tools.github and tools.nix instead of the gh and nix commands they cover; worktree is a direct call only.
 - Return only what you need to see.

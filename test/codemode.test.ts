@@ -60,6 +60,15 @@ return [rows.includes("2:"), names.length, grouped.length, grouped[0][1], median
 	assert.match(ok.result, /true,\s*3,\s*3,\s*1,\s*2\.5,\s*1,\s*2,\s*true/);
 });
 
+test("stdout and stderr stay apart, so .json() parses and .jsonErr() sees the other stream", async () => {
+	const ok = await script(
+		`await fs.write("a.json", '{"a":1}'); await fs.write("b.json", '{"b":2}');
+const r = await run("cat a.json; cat b.json >&2");
+return [r.json().a, r.jsonErr().b, r.output.includes("a"), r.stderr.includes("b")];`,
+	);
+	assert.match(ok.result, /\[1,2,true,true\]/);
+});
+
 test("a // @background script returns at once and wakes the session with its output", async () => {
 	const run = await script('// @background\nawait sleep(1);\nreturn (await sh("echo late")).trim();', { tool: "codemode", args: { code: "await sleep(2);" } });
 	assert.match(run.result, /in the background/);

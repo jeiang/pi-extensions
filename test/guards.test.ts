@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { test } from "node:test";
 import codemode from "../extensions/codemode/index.ts";
-import guards, { commandHabit, commandViolation, maskSecrets, restrictedFolder, switchesBranch } from "../extensions/guards/index.ts";
+import guards, { commandViolation, maskSecrets, restrictedFolder, switchesBranch } from "../extensions/guards/index.ts";
 import workspace from "../extensions/workspace/index.ts";
 import { createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -37,13 +37,6 @@ test("allows ordinary installs and git commands", () => {
 	]) {
 		assert.equal(commandViolation(command), undefined, command);
 	}
-});
-
-test("redirects piped check output without asking, and leaves other pipes alone", () => {
-	assert.ok(commandHabit("npm test 2>&1 | tail -30"));
-	assert.ok(commandHabit("cargo check 2>&1 | grep -E error"));
-	assert.equal(commandViolation("npm test 2>&1 | tail -30"), undefined);
-	assert.equal(commandHabit("git log --oneline | head -5"), undefined);
 });
 
 test("finds branch switches in the session checkout, not file restores, other repositories, or text that mentions one", () => {
