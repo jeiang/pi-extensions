@@ -27,9 +27,11 @@ import {
 	carryChanges,
 	checkoutRelative,
 	createWorktree,
+	deleteBranch,
 	detectRepo,
 	enterWorktree,
 	fastForwardMain,
+	mergedBranch,
 	ownWorktrees,
 	pruneWorktrees,
 	type Repo,
@@ -97,7 +99,7 @@ export default function (pi: ExtensionAPI) {
 	const switchTo = (ctx: ExtensionContext, next: Worktree | undefined) => {
 		worktree = next;
 		setSessionDir(ctx, next?.path);
-		pi.appendEntry(ENTRY, next ?? null);
+		pi.appendEntry(ENTRY, next ?? { main: sessionCwd });
 		if (next && ctx.hasUI) ctx.ui.notify(`Worktree ${next.path} on ${next.branch}`, "info");
 	};
 
@@ -197,14 +199,22 @@ export default function (pi: ExtensionAPI) {
 			.getBranch()
 			.filter((entry) => entry.type === "custom" && entry.customType === ENTRY)
 			.at(-1);
-		const data = saved?.type === "custom" ? (saved.data as Worktree | null | undefined) : undefined;
-		worktree = data && existsSync(data.path) ? data : undefined;
-		setSessionDir(ctx, worktree?.path);
+		const data = saved?.type === "custom" ? (saved.data as Worktree | { main?: string } | null | undefined) : undefined;
+		if (data && "main" in data && typeof data.main === "string" && existsSync(data.main)) {
+			sessionCwd = data.main;
+			repo = (await detectRepo(data.main)) ?? repo;
+			guarded = Boolean(repo && !repo.linked && repo.hasCommits);
+			worktree = undefined;
+			setSessionDir(ctx, data.main);
+		} else {
+			worktree = data && "path" in data && existsSync(data.path) ? data : undefined;
+			setSessionDir(ctx, worktree?.path);
+		}
 	});
 
 	pi.on("before_agent_start", (event) => {
 		if (event.messageType === "user" && !request) request = slug(event.prompt);
-		if (worktree) event.systemPromptOptions.cwd = worktree.path;
+		event.systemPromptOptions.cwd = worktree?.path ?? sessionCwd;
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => setSessionDir(ctx, undefined));
@@ -238,6 +248,7 @@ const worktreeParams = Type.Object({
 			Type.Literal("create"),
 			Type.Literal("enter"),
 			Type.Literal("remove"),
+			Type.Literal("exit"),
 			Type.Literal("list"),
 			Type.Literal("prune"),
 			Type.Literal("carry"),
@@ -248,7 +259,7 @@ const worktreeParams = Type.Object({
 			}),
 		),
 		paths: Type.Optional(Type.Array(Type.String(), { description: "carry: paths changed in the main checkout to move into this worktree." })),
-		force: Type.Optional(Type.Boolean({ description: "remove: discard uncommitted changes." })),
+		force: Type.Optional(Type.Boolean({ description: "remove, exit: discard uncommitted changes." })),
 		repo: Type.Optional(
 			Type.String({
 				description:
@@ -287,6 +298,8 @@ const worktreeParams = Type.Object({
 				await fastForwardMain(root, base);
 				return text(removed.length ? `Removed:\n${removed.join("\n")}` : "Nothing merged to prune.");
 			}
+			case "exit":
+				throw new Error("exit applies to this session's worktree; call it without repo.");
 			case "carry":
 				throw new Error("carry works only in this session's repository.");
 		}
@@ -296,8 +309,8 @@ const worktreeParams = Type.Object({
 		name: "worktree",
 		label: "Worktree",
 		description:
-			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. list. prune: delete clean worktrees whose work is merged, the current one and a detached one included, and their branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes in the main checkout are blocked until create or enter.",
-		promptSnippet: "Create, enter, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
+			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. exit: leave the current worktree, remove it, and return to the main checkout; a merged branch is deleted and an unmerged one kept. list. prune: delete clean worktrees whose work is merged, the current one and a detached one included, and their branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes in the main checkout are blocked until create or enter.",
+		promptSnippet: "Create, enter, exit, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
 		parameters: worktreeParams,
 		exposure: "model-only",
 		async execute(_id, input: Static<typeof worktreeParams>, _signal, _onUpdate, ctx) {
@@ -312,7 +325,8 @@ const worktreeParams = Type.Object({
 				}
 			}
 			if (!repo) return text("Not in a git repository; nothing to do.");
-			if (repo.linked) return text(`The session started in linked worktree ${repo.root}; work in it directly.`);
+			if (repo.linked && input.action !== "exit")
+				return text(`The session started in linked worktree ${repo.root}; use exit to return to ${repo.mainRoot}.`);
 			if (!repo.hasCommits) return text("The repository has no commits; work in it directly.");
 			const { root } = repo;
 			switch (input.action) {
@@ -332,6 +346,30 @@ const worktreeParams = Type.Object({
 					switchTo(ctx, undefined);
 					await fastForwardMain(root, await baseRef(root));
 					return text(`Removed ${gone.path}; branch ${gone.branch} is kept.${guarded ? " Create or enter a worktree before the next write." : ""}`);
+				}
+				case "exit": {
+					const mainRoot = repo.linked ? repo.mainRoot : root;
+					const path = worktree?.path ?? repo.root;
+					const listed = await ownWorktrees(mainRoot);
+					const target = listed.find((w) => w.path === path) ?? (worktree?.path === path ? worktree : undefined);
+					if (!target) return text("No current worktree to exit.");
+					const refusal = await removeWorktree(mainRoot, target.path, input.force ?? false);
+					if (refusal) throw new Error(refusal);
+					sessionCwd = mainRoot;
+					const previous = repo;
+					repo = (await detectRepo(mainRoot)) ?? repo;
+					switchTo(ctx, undefined);
+					// The session directory is the main checkout now, even when the session started in the worktree.
+					setSessionDir(ctx, mainRoot);
+					if (previous.linked) guarded = Boolean(repo && repo.hasCommits);
+					const base = await baseRef(mainRoot);
+					let branch = target.branch ? `; branch ${target.branch} kept` : "";
+					if (target.branch && (await mergedBranch(mainRoot, base, target.branch))) {
+						const deleted = await deleteBranch(mainRoot, target.branch);
+						branch = deleted ? `; branch ${target.branch} deleted (merged)` : `; branch ${target.branch} kept`;
+					}
+					await fastForwardMain(mainRoot, base);
+					return text(`Left ${target.path}; now in ${mainRoot}${branch}.${guarded ? " Create or enter a worktree before the next write." : ""}`);
 				}
 				case "list": {
 					const rows = (await ownWorktrees(root)).map((w) => `${w.path === worktree?.path ? "* " : "  "}${w.path} ${w.branch ?? "(detached)"}`);

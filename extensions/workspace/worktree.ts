@@ -23,6 +23,8 @@ async function tryGit(cwd: string, ...args: string[]): Promise<string | undefine
 export interface Repo {
 	/** Top level of the checkout the session started in. */
 	root: string;
+	/** The main checkout's root; `root` unless the session started in a linked worktree. */
+	mainRoot: string;
 	/** True when that checkout is a linked worktree. */
 	linked: boolean;
 	/** False for a repository without commits, which has nothing to branch from. */
@@ -35,7 +37,10 @@ export async function detectRepo(cwd: string): Promise<Repo | undefined> {
 	const gitDir = resolve(cwd, (await tryGit(cwd, "rev-parse", "--git-dir")) ?? ".git");
 	const commonDir = resolve(cwd, (await tryGit(cwd, "rev-parse", "--git-common-dir")) ?? ".git");
 	const hasCommits = (await tryGit(cwd, "rev-parse", "--verify", "-q", "HEAD")) !== undefined;
-	return { root, linked: gitDir !== commonDir, hasCommits };
+	// The first entry of `worktree list` is the main checkout; `root` is a linked one in a session opened there.
+	const first = (await tryGit(cwd, "worktree", "list", "--porcelain"))?.split("\n").find((line) => line.startsWith("worktree "));
+	const mainRoot = first?.slice("worktree ".length) || root;
+	return { root, mainRoot, linked: gitDir !== commonDir, hasCommits };
 }
 
 export function slug(text: string): string {
@@ -171,6 +176,17 @@ async function mergedInto(root: string, base: string, tip: string): Promise<bool
 		if ((await tryGit(root, "diff", "--quiet", commit, tip, "--", ...files)) !== undefined) return true;
 	}
 	return false;
+}
+
+/** True when `branch`'s work is already in `base`, by merge, fast-forward, squash, or rebase. */
+export async function mergedBranch(root: string, base: string, branch: string): Promise<boolean> {
+	const tip = await tryGit(root, "rev-parse", branch);
+	return tip !== undefined && mergedInto(root, base, tip);
+}
+
+/** Deletes `branch`; returns false when git refuses. Call it only for work already merged. */
+export async function deleteBranch(root: string, branch: string): Promise<boolean> {
+	return (await tryGit(root, "branch", "-D", branch)) !== undefined;
 }
 
 /** Removes clean worktrees, and their branches, whose work is merged into `base`; a detached worktree loses only its checkout. */
