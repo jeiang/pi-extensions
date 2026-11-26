@@ -16,17 +16,21 @@ export interface Devshell {
 	env: Env;
 }
 
-// Variables `nix develop` does not take from the shell derivation.
+// Variables `nix develop` does not take from the shell derivation, and the shell's own bookkeeping.
 const IGNORED = new Set([
+	"_",
 	"BASHOPTS",
 	"HOME",
 	"NIX_BUILD_TOP",
 	"NIX_ENFORCE_PURITY",
 	"NIX_LOG_FD",
 	"NIX_REMOTE",
+	"OLDPWD",
 	"PPID",
+	"PWD",
 	"SHELL",
 	"SHELLOPTS",
+	"SHLVL",
 	"SSL_CERT_FILE",
 	"TEMP",
 	"TEMPDIR",
@@ -36,7 +40,6 @@ const IGNORED = new Set([
 	"TZ",
 	"UID",
 ]);
-
 // .envrc is no marker: nix-direnv's manual reload never builds the cache a fresh worktree lacks.
 const MARKERS = ["devenv.nix", "flake.nix", "shell.nix"];
 const INPUTS = [...MARKERS, "devenv.yaml", "devenv.lock", "flake.lock"];
@@ -108,6 +111,19 @@ function fromDevEnv(json: string): Env {
 	return env;
 }
 
+/** The environment `nix develop --command` left, after the devshell's shellHook ran. */
+export function fromNulEnv(text: string): Env {
+	const env: Env = {};
+	for (const entry of text.split("\0")) {
+		const separator = entry.indexOf("=");
+		if (separator <= 0) continue;
+		const name = entry.slice(0, separator);
+		if (IGNORED.has(name) || name.startsWith("BASH_FUNC_")) continue;
+		env[name] = entry.slice(separator + 1);
+	}
+	return env;
+}
+
 interface DirenvStatus {
 	state?: { foundRC?: { allowed?: unknown } | null };
 }
@@ -138,20 +154,21 @@ export async function resolveDevshell(cwd: string): Promise<Devshell | undefined
 	}
 	if (has("flake.nix")) {
 		const key = fingerprint(root, ["flake.nix", "flake.lock"]);
-		const env = await cached(`flake-${key}`, async () => {
-			const { stdout } = await run("nix", ["print-dev-env", "--json", root], { cwd: root, maxBuffer: 64 * 1024 * 1024 });
-			return fromDevEnv(stdout);
+		// print-dev-env leaves the environment as it was before shellHook; nix develop runs the hook.
+		const env = await cached(`flake-develop-${key}`, async () => {
+			const { stdout } = await run("nix", ["develop", "--ignore-environment", "--command", "env", "-0"], { cwd: root, maxBuffer: 64 * 1024 * 1024 });
+			return fromNulEnv(stdout);
 		});
 		return { root, kind: "flake", env };
 	}
 	if (has("shell.nix")) {
 		const key = fingerprint(root, ["shell.nix"]);
-		const env = await cached(`shellnix-${key}`, async () => {
-			const { stdout } = await run("nix", ["print-dev-env", "--json", "-f", join(root, "shell.nix")], {
+		const env = await cached(`shellnix-develop-${key}`, async () => {
+			const { stdout } = await run("nix", ["develop", "--ignore-environment", "-f", join(root, "shell.nix"), "--command", "env", "-0"], {
 				cwd: root,
 				maxBuffer: 64 * 1024 * 1024,
 			});
-			return fromDevEnv(stdout);
+			return fromNulEnv(stdout);
 		});
 		return { root, kind: "shell.nix", env };
 	}

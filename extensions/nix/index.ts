@@ -46,6 +46,7 @@ const params = Type.Object({
 	base: Type.Optional(Type.String({ description: "drv_diff: git revision to compare against; default HEAD." })),
 	version: Type.Optional(Type.String({ description: "versions: only this version." })),
 	stores: Type.Optional(Type.Array(Type.String(), { description: "cache: substituter URLs; default the configured ones." })),
+	store: Type.Optional(Type.String({ description: "dry_run: build against this store (`ssh-ng://host`) with local evaluation, instead of the local store." })),
 	input: Type.Optional(Type.String({ description: "inputs: input to list or read; omit for all." })),
 	limit: Type.Optional(Type.Number({ description: "search, versions: most results (default 10)." })),
 });
@@ -312,17 +313,22 @@ async function drvDiff(input: Params, flakeDir: string, signal: AbortSignal | un
 	};
 }
 
+/** `nix build --dry-run` against `store` when given; evaluation stays on the local store, which holds the flake inputs. */
+export function dryRunArgs(installables: string[], store?: string): string[] {
+	return ["build", "--dry-run", "--no-link", ...(store ? ["--store", store, "--eval-store", "auto"] : []), ...installables];
+}
+
 async function dryRun(input: Params, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<Output> {
 	if (!input.outputs?.length) throw new Error("dry_run needs outputs.");
 	const installables = await Promise.all(input.outputs.map((output) => installableOf(output, flake, cwd, signal)));
-	const run = await nix(["build", "--dry-run", "--no-link", ...installables], cwd, signal);
+	const run = await nix(dryRunArgs(installables, input.store), cwd, signal);
 	if (run.code !== 0) throw failure(run, "nix build --dry-run");
 	const parsed = parseDryRun(run.stderr);
 	return {
 		action: "dry_run",
 		...parsed,
 		heavy: await heavyOf(parsed.build, cwd, signal),
-		note: "Counted against this machine's substituters; CI may use others.",
+		note: input.store ? `Counted against ${input.store}; evaluation stayed local.` : "Counted against this machine's substituters; CI may use others.",
 	};
 }
 

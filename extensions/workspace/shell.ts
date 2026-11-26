@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -24,18 +24,19 @@ const TAIL_LINES = 30;
 const STDERR_MAX_BYTES = 256 * 1024;
 const quotePath = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
-/** The command under a pty, so a program that insists on a terminal (sudo) can prompt. */
-export function ttyCommand(command: string, platform: NodeJS.Platform = process.platform): string {
-	return platform === "darwin" ? `script -q /dev/null bash -c ${quotePath(command)}` : `script -qec ${quotePath(command)} /dev/null`;
+/** The command under a pty, so a program that insists on a terminal (sudo) can prompt. The inner shell writes its pid, which is its session's id too. */
+export function ttyCommand(command: string, platform: NodeJS.Platform = process.platform, pidFile?: string): string {
+	const inner = pidFile ? `echo $$ > ${quotePath(pidFile)}; ${command}` : command;
+	return platform === "darwin" ? `/usr/bin/script -q /dev/null bash -c ${quotePath(inner)}` : `script -qec ${quotePath(inner)} /dev/null`;
 }
 /** A pty prints `^D` for the end of the caller's stdin and turns every newline into CRLF; neither belongs in the log. */
 export function ttyOutput(text: string): string {
 	return text.replace(/\^D\x08\x08/g, "").replace(/\r\n/g, "\n");
 }
 /** The command as the shell runs it: stderr to its own file, so stdout alone stays parseable, under a pty when asked. */
-export function jobCommand(command: string, errFile: string, tty: boolean): string {
+export function jobCommand(command: string, errFile: string, tty: boolean, pidFile?: string): string {
 	const wrapped = `{ ${command}\n} 2> ${quotePath(errFile)}`;
-	return tty ? ttyCommand(wrapped) : wrapped;
+	return tty ? ttyCommand(wrapped, undefined, pidFile) : wrapped;
 }
 const MAX_WAKES = 5;
 /** pi's limit on the `output` codemode scripts get from `bash`. */
@@ -55,6 +56,8 @@ interface Job {
 	/** Standard output alone, and standard error alone; the log holds both. */
 	stdout?: string;
 	stderr?: string;
+	/** A tty job's shell writes its pid here; it is the session `script`(1) made. */
+	pidFile?: string;
 	/** `overwrite`: the line replaces the one before it, as after a carriage return. */
 	listeners: Set<(line: string, overwrite: boolean) => void>;
 	done: Promise<void>;
@@ -268,6 +271,9 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		// stderr goes to its own file, inside the pty too, so a command's JSON on stdout stays parseable.
 		const errFile = join(logDir, `${process.pid}-${id}.err`);
 		writeFileSync(errFile, "");
+		// A tty's shell is its own session, so its pid is the only handle on the group that holds the command.
+		const pidFile = tty ? join(logDir, `${process.pid}-${id}.pid`) : undefined;
+		if (pidFile) writeFileSync(pidFile, "");
 		const controller = new AbortController();
 		const listeners: Job["listeners"] = new Set();
 		let partial = "";
@@ -277,9 +283,9 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			if (overwrite && line === "") return;
 			for (const listener of listeners) listener(line, overwrite);
 		};
-		const job: Job = { id, command: label, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, done: Promise.resolve() };
+		const job: Job = { id, command: label, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, pidFile, done: Promise.resolve() };
 		job.done = ops
-			.exec(jobCommand(command, errFile, tty), cwd, {
+			.exec(jobCommand(command, errFile, tty, pidFile), cwd, {
 				signal: controller.signal,
 				env: { ...env, PYTHONUNBUFFERED: "1" },
 				onData: (data) => {
@@ -305,13 +311,18 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 				appendFileSync(log, `\n[shell] ${error.message}\n`);
 			})
 			.finally(() => {
-				job.ended = Date.now();
-				// The log holds both streams for reading later; the two fields keep them apart for parsing.
-				job.stdout = existsSync(log) ? readFileSync(log, "utf8") : "";
-				job.stderr = existsSync(errFile) ? readFileSync(errFile, "utf8") : "";
-				if (job.stderr.trim()) appendFileSync(log, `\n[stderr]\n${job.stderr}`);
-				if (partial) emit(partial.replace(/\r$/, ""));
-			});
+			job.ended = Date.now();
+			// The log holds both streams for reading later; the two fields keep them apart for parsing.
+			job.stdout = existsSync(log) ? readFileSync(log, "utf8") : "";
+			job.stderr = existsSync(errFile) ? readFileSync(errFile, "utf8") : "";
+			if (job.stderr.trim()) appendFileSync(log, `\n[stderr]\n${job.stderr}`);
+			if (partial) emit(partial.replace(/\r$/, ""));
+			if (pidFile) try {
+				unlinkSync(pidFile);
+			} catch {
+				// The file is gone already.
+			}
+		});
 		jobs.set(id, job);
 		return job;
 	};
@@ -382,8 +393,45 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		return job;
 	};
 
-	pi.on("session_shutdown", () => {
-		for (const job of jobs.values()) if (job.status === "running") job.controller.abort();
+	/** The pid the pty's shell wrote before running its command, once it is there. */
+	const ptyPid = (job: Job): number | undefined => {
+		if (!job.pidFile) return undefined;
+		try {
+			const pid = Number(readFileSync(job.pidFile, "utf8").trim());
+			return Number.isInteger(pid) && pid > 1 ? pid : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+
+	/** Ends a job and the group it runs in; a pty's shell is its own session, out of reach of the outer tree kill. */
+	const stop = async (job: Job) => {
+		if (job.status !== "running") return job.done;
+		const pty = ptyPid(job);
+		if (pty !== undefined) {
+			try {
+				process.kill(-pty, "SIGKILL");
+			} catch {
+				// It exited between the read and the signal.
+			}
+		}
+		job.controller.abort();
+		if (pty === undefined && job.pidFile) {
+			// `script`(1) may still be starting the pty's shell; one that writes its pid after the abort is still ours.
+			await new Promise((done) => setTimeout(done, 100));
+			const late = ptyPid(job);
+			if (late !== undefined)
+				try {
+					process.kill(-late, "SIGKILL");
+				} catch {
+					// It exited meanwhile.
+				}
+		}
+		await job.done;
+	};
+
+	pi.on("session_shutdown", async () => {
+		await Promise.all([...jobs.values()].filter((job) => job.status === "running").map(stop));
 	});
 
 	/** The codemode `bash` tool: pi's result shape, run as a job. */
@@ -397,8 +445,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		const why = await waitFor(job, undefined, input.timeout, signal);
 		unfollow();
 		if (why !== "exit") {
-			job.controller.abort();
-			await job.done;
+			await stop(job);
 			jobs.delete(job.id);
 			const status = why === "abort" ? "Command aborted" : `Command timed out after ${input.timeout} seconds`;
 			throw new Error(`${truncateTail(readLog(job)).content}\n\n${status}`);
@@ -431,8 +478,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		unfollow();
 		if (why === "exit") return finished(job, input.tail);
 		if (why === "abort") {
-			job.controller.abort();
-			await job.done;
+			await stop(job);
 			return progress(job, "Cancelled.", input.tail);
 		}
 		reportExit(job);
@@ -452,8 +498,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			if (input.action === "status") return text([...jobs.values()].map(summary).join("\n") || "No jobs.");
 			if (input.action === "kill") {
 				const job = findJob(input.job);
-				job.controller.abort();
-				await job.done;
+				await stop(job);
 				return { ...text(summary(job)), structuredContent: shape(job, "") };
 			}
 			const pattern = input.wait_on ? new RegExp(input.wait_on.replace(/^\(\?i\)/, ""), input.wait_on.startsWith("(?i)") ? "i" : "") : undefined;
@@ -490,8 +535,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			const why = await waitFor(job, pattern, seconds, signal);
 			unfollow();
 			if (why === "abort") {
-				job.controller.abort();
-				await job.done;
+				await stop(job);
 				return progress(job, "Cancelled.", input.tail);
 			}
 			if (why === "exit") return finished(job, input.tail);

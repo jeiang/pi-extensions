@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseDryRun } from "../extensions/nix/index.ts";
+import { dryRunArgs, parseDryRun } from "../extensions/nix/index.ts";
 
 test("parseDryRun reads the build and fetch lists and sizes, in singular and plural forms", () => {
 	const plural = parseDryRun(
@@ -23,4 +23,18 @@ test("parseDryRun reads the build and fetch lists and sizes, in singular and plu
 	const single = parseDryRun("this derivation will be built:\n  /nix/store/qj4m0bv1qzm09p6b2b8aa3ii2mq4ayh0-hello-probe-2.12.3.drv\n");
 	assert.deepEqual(single.build, ["/nix/store/qj4m0bv1qzm09p6b2b8aa3ii2mq4ayh0-hello-probe-2.12.3.drv"]);
 	assert.deepEqual(parseDryRun("").build, []);
+});
+
+test("dry_run keeps evaluation local and sends the build to the named store", () => {
+	assert.deepEqual(dryRunArgs([".#host"]), ["build", "--dry-run", "--no-link", ".#host"]);
+	assert.deepEqual(dryRunArgs([".#host"], "ssh-ng://artemis"), [
+		"build",
+		"--dry-run",
+		"--no-link",
+		"--store",
+		"ssh-ng://artemis",
+		"--eval-store",
+		"auto",
+		".#host",
+	]);
 });
