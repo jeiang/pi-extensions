@@ -161,6 +161,23 @@ async function writeKeepingMode(link: string, content: string, modeOf = link) {
 	await rename(temp, path);
 }
 
+type Snapshot = { content: Buffer; mode: number } | undefined;
+
+const snapshot = async (path: string): Promise<Snapshot> => {
+	const info = await stat(path).catch(() => undefined);
+	return info ? { content: await readFile(path), mode: info.mode } : undefined;
+};
+
+/** Restores a file's earlier bytes and mode through a temporary file, so a read-only file comes back too; `ifMissing` leaves a file that is still there. */
+async function putBack(path: string, saved: Snapshot, ifMissing = false) {
+	if (ifMissing && existsSync(path)) return;
+	if (!saved) return rm(path, { force: true });
+	path = await realpath(path).catch(() => path);
+	const temp = `${path}.pi-lsp-${process.pid}-${randomBytes(3).toString("hex")}`;
+	await writeFile(temp, saved.content, { mode: saved.mode });
+	await rename(temp, path);
+}
+
 /**
  * Applies a stored preview under the file locks: every file must still hold the content the
  * preview saw, writes go through a temporary file, and a failure part way puts back the earlier content.
@@ -178,24 +195,17 @@ export async function applyPreview(token: string): Promise<Preview> {
 		try {
 			for (const change of preview.changes) {
 				// Each undo is registered before its step, so a step that fails half done is undone too.
-				const previous = change.before;
-				const restore = () => (previous === undefined ? rm(change.path, { force: true }) : writeFile(change.path, previous));
+				const destination = await snapshot(change.path);
 				if (change.from) {
-					const source = change.from;
-					const original = await readFile(source);
-					undo.push(async () => {
-						await writeFile(source, original);
-						await restore();
-					});
-					await writeKeepingMode(change.path, change.after ?? "", source);
-					await unlink(source);
-				} else if (change.delete) {
-					const original = await readFile(change.path);
-					undo.push(() => writeFile(change.path, original));
-					await unlink(change.path);
+					const source = await snapshot(change.from);
+					undo.push(() => putBack(change.from as string, source, true));
+					undo.push(() => putBack(change.path, destination));
+					await writeKeepingMode(change.path, change.after ?? "", change.from);
+					await unlink(change.from);
 				} else {
-					undo.push(restore);
-					await writeKeepingMode(change.path, change.after ?? "");
+					undo.push(() => putBack(change.path, destination));
+					if (change.delete) await unlink(change.path);
+					else await writeKeepingMode(change.path, change.after ?? "");
 				}
 			}
 		} catch (error) {

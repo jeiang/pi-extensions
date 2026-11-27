@@ -319,7 +319,7 @@ export class LspClient {
 	}
 
 	/** Diagnostics for a synced version: a push since it was sent (and since `after`), a pull, or a timeout. */
-	async diagnostics(path: string, languageId: string, signal?: AbortSignal, after = -1): Promise<DiagnosticsResult> {
+	async diagnostics(path: string, languageId: string, signal?: AbortSignal, after = -1, reopened = false): Promise<DiagnosticsResult> {
 		const doc = await this.sync(path, languageId);
 		const since = Math.max(doc.sentAt, after);
 		const fresh = () => {
@@ -330,6 +330,9 @@ export class LspClient {
 		if (now) return { status: "fresh", items: now };
 		const provider = this.pullProvider();
 		if (!provider && this.silent.get(doc.uri) === doc.version) return { status: "timeout", items: [] };
+		// A push server that last reported the file clean may stay silent while it stays clean, so wait less before reopening it.
+		const quiet = !provider && !reopened && this.pushed.get(doc.uri)?.diagnostics.length === 0;
+		const waitMs = quiet ? Math.min(1000, this.timeouts.diagnosticsMs) : this.timeouts.diagnosticsMs;
 		const done = new AbortController();
 		const both = signal ? AbortSignal.any([signal, done.signal]) : done.signal;
 		const waitPush = new Promise<DiagnosticsResult>((resolveWait, reject) => {
@@ -340,7 +343,7 @@ export class LspClient {
 			const set = this.waiters.get(doc.uri) ?? new Set();
 			set.add(check);
 			this.waiters.set(doc.uri, set);
-			const timer = setTimeout(() => reject(new LspError("timeout")), this.timeouts.diagnosticsMs);
+			const timer = setTimeout(() => reject(new LspError("timeout")), waitMs);
 			both.addEventListener(
 				"abort",
 				() => {
@@ -357,8 +360,11 @@ export class LspClient {
 			return await Promise.any(candidates);
 		} catch {
 			if (signal?.aborted) throw new LspError("aborted");
-			// Some push servers (typescript-language-server) publish nothing when a clean file stays clean.
-			if (!provider && this.pushed.get(doc.uri)?.diagnostics.length === 0) return { status: "fresh", items: [] };
+			// typescript-language-server publishes nothing when a clean file stays clean; reopening makes it report the file.
+			if (quiet && this.docs.get(doc.uri)?.version === doc.version) {
+				await this.close(path);
+				return this.diagnostics(path, languageId, signal, after, true);
+			}
 			if (!provider && this.docs.get(doc.uri)?.version === doc.version) this.silent.set(doc.uri, doc.version);
 			return { status: "timeout", items: [] };
 		} finally {

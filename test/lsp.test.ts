@@ -104,6 +104,7 @@ test("a move that fails part way restores the file it overwrote, and a recreated
 	const source = join(locked, "s.txt");
 	const target = join(dir, "t.txt");
 	writeFileSync(source, "source\n");
+	chmodSync(source, 0o444);
 	writeFileSync(target, "target\n");
 	const preview = storePreview("test", await planWorkspaceEdit({ documentChanges: [{ kind: "rename", oldUri: uri(source), newUri: uri(target), options: { overwrite: true } }] }, "utf-16"));
 	chmodSync(locked, 0o555);
