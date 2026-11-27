@@ -404,6 +404,8 @@ export async function runLsp(service: Service, input: LspParams, resolvePath: (p
 			const changes = await planWorkspaceEdit({ ...edit, documentChanges: [...(edit.documentChanges ?? []), { kind: "rename", oldUri: files[0]!.oldUri, newUri: files[0]!.newUri }] }, client?.encoding ?? "utf-16");
 			const notify = client;
 			return preview(service, `move ${displayPath(from, service.cwd)} to ${displayPath(to, service.cwd)}`, changes, async () => {
+				// The server must not keep the old path open beside the moved file.
+				for (const route of service.routes(from)) await (await service.client(route).catch(() => undefined))?.close(from);
 				if (notify?.capabilities.workspace?.fileOperations?.didRename) await notify.notify("workspace/didRenameFiles", { files });
 			});
 		}

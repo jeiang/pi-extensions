@@ -292,6 +292,15 @@ export class LspClient {
 		return doc;
 	}
 
+	/** Closes a document, such as one a rename moved away. */
+	async close(path: string): Promise<void> {
+		const uri = pathToFileURL(resolve(path)).href;
+		if (!this.docs.delete(uri) || this.failure) return;
+		this.pushed.delete(uri);
+		this.pulled.delete(uri);
+		await this.notify("textDocument/didClose", { textDocument: { uri } });
+	}
+
 	/** Absolute paths of the open documents, oldest first. */
 	openPaths(): string[] {
 		return [...this.docs.keys()].map((uri) => fileURLToPath(uri));

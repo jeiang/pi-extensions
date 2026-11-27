@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TextEdit, WorkspaceEdit } from "vscode-languageserver-protocol";
@@ -147,8 +147,9 @@ export function renderPreview(preview: Preview, cwd: string): string {
 	return [`Preview of ${preview.label}: ${preview.changes.length} file(s). Nothing written; call again with apply: true and token "${preview.token}".`, ...rows].join("\n");
 }
 
-/** Writes through a temporary file with the mode of `modeOf`, the file itself unless it is a move. */
-async function writeKeepingMode(path: string, content: string, modeOf = path) {
+/** Writes through a temporary file with the mode of `modeOf`, the file itself unless it is a move; a symlink's target is written, not replaced. */
+async function writeKeepingMode(link: string, content: string, modeOf = link) {
+	const path = await realpath(link).catch(() => link);
 	const mode = await stat(modeOf).then(
 		(info) => info.mode,
 		() => undefined,
