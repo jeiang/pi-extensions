@@ -79,14 +79,14 @@ interface Job {
 	claimed?: boolean;
 }
 
-export const cwdParam = Type.Optional(
+const cwdParam = Type.Optional(
 	Type.String({
 		description: "Directory to run in, such as a worktree of another repository; an absolute path, or relative to the session directory. Loads that directory's devshell.",
 	}),
 );
 
 /** The pty flag, on the shell tool and the codemode `bash` tool its scripts call. */
-export const ttyParam = Type.Optional(
+const ttyParam = Type.Optional(
 	Type.Boolean({
 		description:
 			"Run under a pty, so a program that checks for a terminal works (`sudo` can prompt, progress output renders). stdout and stdin are the terminal, with line endings normalized; stderr stays apart, and the log holds both.",
@@ -104,7 +104,7 @@ const sshParams = Type.Object({
 	agent_forward: Type.Optional(Type.Boolean({ description: "Forward the local ssh agent (-A)." })),
 });
 
-export const runParams = Type.Object({
+const runParams = Type.Object({
 	command: Type.String({ description: "Shell command (bash). Runs inside the directory's devshell, or with host under the remote bash whatever its login shell." }),
 	cwd: cwdParam,
 	host: Type.Optional(
@@ -128,7 +128,7 @@ export const runParams = Type.Object({
 });
 type RunParams = Static<typeof runParams>;
 
-export const jobParams = Type.Object({
+const jobParams = Type.Object({
 	action: Type.Union([Type.Literal("status"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("write")], {
 		description:
 			"status: list jobs (commands, background subagents, scripts, CI watches). read: new output since the last read. wait: until wait_on matches, wait_seconds pass, or the job ends, else 120s. kill: stop it. write: send input to an interactive command.",
@@ -148,7 +148,7 @@ export function lastLines(output: string, lines: number) {
 	return { content: shown.join("\n"), truncated: shown.length < rows.length };
 }
 
-export const shellOutputSchema = Type.Object({
+const shellOutputSchema = Type.Object({
 	job: Type.Optional(Type.String({ description: "The job id; job waits on, reads, writes to, or kills it." })),
 	status: Type.Optional(Type.String({ description: "running, exited, killed, failed, or for other jobs done" })),
 	exit_code: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
