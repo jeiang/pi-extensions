@@ -151,6 +151,7 @@ export default function (pi: ExtensionAPI) {
 			if (!folder || (!input.apply && readableFolder(folder)) || input.paths?.some((path) => restrictedFolder(path, cwd()) === folder)) return undefined;
 			return `${folder} is restricted; name it in paths so the user is asked.`;
 		}),
+		{ exposure: "codemode" },
 	);
 	override(structuredGrep);
 	override(structuredFind, { exposure: "codemode" });
@@ -331,7 +332,6 @@ const worktreeParams = Type.Object({
 			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. exit: leave the current worktree, remove it, and return to the main checkout; a merged branch is deleted and an unmerged one kept. list. prune: delete clean worktrees whose work is merged, the current one and a detached one included, and their branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. ff_main: fast-forward the default branch to name, else this worktree's branch, else origin's default branch; anything but a fast-forward is refused, and nothing is pushed. Writes in the main checkout are blocked until create or enter.",
 		promptSnippet: "Create, enter, exit, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in; fast-forward main. Create one before writing",
 		parameters: worktreeParams,
-		exposure: "model-only",
 		async execute(_id, input: Static<typeof worktreeParams>, _signal, _onUpdate, ctx) {
 			if (!worktree && !repo?.hasCommits) repo = await detectRepo(sessionCwd);
 			if (input.repo) {

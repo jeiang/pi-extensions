@@ -43,6 +43,11 @@ test("the wrapped codemode lists the helpers and runs them after an options line
 	assert.match(shadowed.result, /Script completed[\s\S]*\n1\b/);
 });
 
+test("a tool that takes an action gets a method per action", async () => {
+	const ok = await script(`return typeof tools.shell.status === "function" ? (await tools.shell.status()).output : "missing";`);
+	assert.match(ok.result, /Script completed[\s\S]*No jobs/);
+});
+
 test("json() finds the JSON when progress lines came first", async () => {
 	const ok = await script(`return (await json("echo unpacking; echo '{\\"a\\":1}'")).a === 1 ? "parsed" : "wrong";`);
 	assert.match(ok.result, /Script completed[\s\S]*parsed/);

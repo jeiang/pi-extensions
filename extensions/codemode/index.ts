@@ -39,6 +39,7 @@ const HELPERS = `Helpers defined in every script:
 - fs: text(path) → raw file text; rows(path, from = 1, count = 200) → numbered window; write(path, content); glob(pattern); ls(path) → names.
 - Text: lines(text) · page(text, from, count) · count(items, key?) → sorted [value, n] · unique · sum · median · p95.
 - put(key, value) / get(key): JSON state across scripts. Above 64 KiB it spills to a file and returns that path; load()/store() stay for small values, at most 256 KiB each and 1 MiB together.
+- tools.<tool>.<op>(args) calls a tool that takes an op or action: tools.github.pr_view({ pr: "12" }) is tools.github({ op: "pr_view", pr: "12" }).
 - settle(promises) → each value, or "Error: …". mapLimit(items, n, fn). sleep(s). poll(fn, { every = 15, timeout = 600 }).
 - job(cmd, { wait_on, wait_seconds }) → background shell job { job, status, log }; tools.shell({ action: "wait", job, wait_on }) waits, and you are woken when it exits.
 A script with no \`timeout_ms\` is killed at ${DEFAULT_TIMEOUT_MS / 60_000} minutes; raise it on the first line with \`// @options: {"timeout_ms": N}\`.
@@ -48,7 +49,7 @@ The script is the program; a command runs one external program:
 - One program per run(). Independent commands go in separate calls under settle(), so each keeps its own exit code and output and one failure does not hide the rest.
 - Filter, count, sort, and join in JS, not with \`;\` chains or pipes into head, tail, grep, sort, awk, or jq. For a --json command, reach for .json()/json().
 - Keep intermediate results in variables, or in put()/get() across scripts.
-- Declared tools work here too. Use tools.github and tools.nix instead of the gh and nix commands they cover; worktree is a direct call only.
+- Declared tools work here too. Use tools.github and tools.nix instead of the gh and nix commands they cover.
 - Return only what you need to see.
 
 \`\`\`js
@@ -74,12 +75,37 @@ return { tail: r.output, failures: failures.map((l) => l.text) };
 const GUIDELINE =
 	"Run commands through codemode and write the work as a JS program: one external program per run(), independent commands in parallel with settle(), output filtered and joined in JS instead of pipes, `;` chains, or /tmp files.";
 
+interface Schema {
+	properties?: Record<string, { const?: unknown; enum?: unknown[]; anyOf?: { const?: unknown }[] }>;
+}
+
+/**
+ * One line that gives each tool taking an `op` or `action` a method per value, so a script writes
+ * tools.github.pr_view(args) for tools.github({ op: "pr_view", ...args }).
+ */
+export function opMethods(list: { name: string; parameters?: unknown }[]): string {
+	const identifier = /^[A-Za-z_$][\w$]*$/;
+	return list
+		.flatMap(({ name, parameters }) => {
+			const properties = (parameters as Schema | undefined)?.properties ?? {};
+			const key = ["op", "action"].find((candidate) => candidate in properties);
+			if (!key) return [];
+			const field = properties[key];
+			const values = [...(field?.enum ?? []), ...(field?.anyOf ?? []).map((option) => option.const)].filter((v): v is string => typeof v === "string" && identifier.test(v));
+			const id = name.replace(/[^\w$]/g, "_");
+			if (values.length === 0 || !identifier.test(id)) return [];
+			const methods = values.map((value) => `tools.${id}.${value} = (a = {}) => tools.${id}({ ...a, ${key}: ${JSON.stringify(value)} });`).join(" ");
+			return [`if (typeof tools.${id} === "function") { ${methods} }`];
+		})
+		.join(" ");
+}
+
 /** The script with an options line and the prelude around it. A default deadline is added when the script sets none. */
-function withPrelude(code: string, spill = ""): string {
+function withPrelude(code: string, spill = "", methods = ""): string {
 	const options = /^\/\/ @options:[^\n]*\n?/.exec(code)?.[0] ?? "";
 	const body = code.slice(options.length);
 	const deadline = /timeout_ms/.test(code.slice(0, 300)) ? "" : `// @options: ${JSON.stringify({ timeout_ms: DEFAULT_TIMEOUT_MS })}\n`;
-	return `${options}${deadline}${prelude(spill)} {${body}\n}`;
+	return `${options}${deadline}${prelude(spill)} ${methods} {${body}\n}`;
 }
 
 /** The session's spill directory for values too big for the transcript, or "" when the session is unsaved. */
@@ -144,8 +170,9 @@ export default function (pi: ExtensionAPI) {
 					(error: Error) => wake(`Background script ${id} failed: ${error.message}`, true),
 				);
 			const spill = spillDir(ctx);
+			const methods = opMethods(pi.getAllTools());
 			if (!background) {
-				const code = withPrelude(params.code, spill);
+				const code = withPrelude(params.code, spill, methods);
 				// A script moved to the background outlives its tool call, so only session shutdown cancels it then.
 				const outcome = await untilInterrupt(id, signal, (own, attached) =>
 					original.execute(id, { code }, AbortSignal.any([own, shutdown.signal]), (update) => {
@@ -157,7 +184,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `The user interrupted; script ${id} moved to the background and you are woken with its result.` }], details: undefined };
 			}
 			// A background script outlives its tool call, so only session shutdown cancels it.
-			const script = original.execute(id, { code: withPrelude(params.code.slice(background[0].length), spill) }, shutdown.signal, undefined, ctx);
+			const script = original.execute(id, { code: withPrelude(params.code.slice(background[0].length), spill, methods) }, shutdown.signal, undefined, ctx);
 			inBackground(id, script);
 			report(script);
 			return { content: [{ type: "text", text: `Started script ${id} in the background; you are woken with its result.` }], details: undefined };
