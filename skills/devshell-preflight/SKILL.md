@@ -5,7 +5,7 @@ description: Diagnose a repository's Nix development environment when a command 
 
 # Devshell Preflight
 
-Codemode commands (`run()`, `tools.shell`) and `!` commands already run inside the repository's
+Codemode commands (`run()`) and `!` commands already run inside the repository's
 devshell: the nearest `devenv.nix`, else `flake.nix` devShell, else
 `shell.nix`, cached per lock file. direnv and `.envrc` play no part in it.
 Use this skill only when a command fails because of that environment.

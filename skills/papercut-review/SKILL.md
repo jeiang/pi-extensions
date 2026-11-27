@@ -21,7 +21,7 @@ report. Each report is a hypothesis written mid-task, not a finding.
 Load the open reports in one codemode script:
 
 ```js
-const dir = (await sh('printf %s "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"')).trim();
+const dir = (await run('printf %s "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"', { check: true }).text()).trim();
 const read = async (f) => {
   try { return (await tools.read_text({ path: `${dir}/${f}` })).text.split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
   catch { return []; }

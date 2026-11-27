@@ -19,14 +19,17 @@ test("option values and commands reach ssh as single arguments, never as local s
 test("a key and a port belong to the connection, a pty and stdin to the session", () => {
 	assert.deepEqual(connectionFlags({ identity: "~/.ssh/id_ed25519", port: 2222, agentForward: true }), ["-i", "~/.ssh/id_ed25519", "-p", "2222", "-A"]);
 	assert.deepEqual(connectionFlags({}), []);
-	assert.deepEqual(sessionFlags({ tty: true }), ["-t"]);
-	assert.deepEqual(sessionFlags({ noStdin: true }), ["-n"]);
-	// A pty and "never read stdin" contradict each other; the pty is what sudo needs.
-	assert.deepEqual(sessionFlags({ tty: true, noStdin: true }), ["-t"]);
+	// The local side has no terminal, so only a doubled -t allocates the remote pty.
+	assert.deepEqual(sessionFlags({ tty: true }), ["-tt"]);
+	assert.deepEqual(sessionFlags({}), ["-n"]);
+	assert.deepEqual(sessionFlags({ stdin: true }), []);
 });
 
 test("the remote command runs its script unchanged under bash, from the given directory", () => {
 	const script = "printf '%s|' \"a'b\\\\c\" \"$(pwd)\"";
 	assert.equal(bash(remoteCommand(script, "/")), "a'b\\c|/|");
 	assert.equal(remoteCommand("true").includes("'"), false);
+	// With stdin, the script goes as an argument and bash's stdin is the caller's.
+	assert.equal(execFileSync("bash", ["-c", remoteCommand("cat; pwd", "/", true)], { input: "in\n", encoding: "utf8" }), "in\n/\n");
+	assert.equal(remoteCommand("true", undefined, true).includes("'"), false);
 });

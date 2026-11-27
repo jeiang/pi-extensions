@@ -38,6 +38,6 @@ test("plan mode blocks renames, worktree changes, and pull requests, and leaves 
 	assert.match(reason("github", { op: "pr_merge", method: "squash" }) ?? "", /pull request changes/);
 	assert.equal(reason("github", { op: "pr_view" }), undefined);
 	// A command may act, but only the model can tell; the planning prompt forbids it.
-	assert.equal(reason("shell", { command: "rm -rf /" }), undefined);
+	assert.equal(reason("run", { command: "rm -rf /" }), undefined);
 	assert.equal(reason("codemode", { code: "return 1" }), undefined);
 });

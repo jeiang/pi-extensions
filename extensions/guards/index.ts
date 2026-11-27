@@ -9,9 +9,7 @@ interface Rule {
 	reason: string;
 }
 
-const COMMAND_TOOLS: Record<string, true> = { bash: true, shell: true, ssh: true };
-/** Their commands run elsewhere, so a path in them is not a local folder. */
-const REMOTE_TOOLS: Record<string, true> = { ssh: true };
+const COMMAND_TOOLS: Record<string, true> = { run: true };
 const PATH_TOOLS: Record<string, true> = { read: true, read_text: true, write: true, edit: true, replace: true, substitute: true, grep: true, find: true, ls: true };
 const READ_TOOLS: Record<string, true> = { read: true, read_text: true, grep: true, find: true, ls: true };
 
@@ -240,7 +238,8 @@ export default function (pi: ExtensionAPI) {
 				const verdict = await ask(ctx, "Allow blocked command?", `${violation}\n\n${command}`);
 				if (!verdict.allowed) return block(verdict.why, violation);
 			}
-			if (REMOTE_TOOLS[event.toolName]) return;
+			// A command on another host runs elsewhere, so a path in it is not a local folder.
+			if (typeof input.host === "string") return;
 			const dir = typeof input.cwd === "string" ? resolve(sessionDir(ctx), input.cwd) : sessionDir(ctx);
 			const switching = switchViolation(command, dir);
 			if (switching) {

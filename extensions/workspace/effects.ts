@@ -13,7 +13,7 @@ export type Effect =
 	| { kind: "write"; paths: string[] }
 	/** A call that changes something outside the filesystem: a pull request, a worktree, a deploy. */
 	| { kind: "mutate" }
-	/** A call that may act and cannot be classified: shell, codemode, ssh, a subagent. */
+	/** A call that may act and cannot be classified: run, codemode, a subagent. */
 	| { kind: "opaque" };
 
 const READ: Effect = { kind: "read" };
@@ -67,9 +67,15 @@ export function effectsOf(tool: string, input: Record<string, unknown>, cwd: str
 			return input.op === "pr_create" || input.op === "pr_merge" ? MUTATE : READ;
 		case "worktree":
 			return input.action === "list" ? READ : MUTATE;
-		case "shell":
+		case "job":
+			// Killing or feeding a job acts; looking at one does not.
+			return input.action === "kill" || input.action === "write" ? OPAQUE : READ;
+		case "transfer": {
+			if (input.direction !== "download" || typeof input.local !== "string") return OPAQUE;
+			return { kind: "write", paths: [resolve(cwd, input.local.replace(/^@/, ""))] };
+		}
+		case "run":
 		case "codemode":
-		case "ssh":
 		case "subagent":
 			return OPAQUE;
 	}

@@ -5,12 +5,9 @@ import { userInfo } from "node:os";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import type { registerShell } from "./shell.ts";
 
 const exec = promisify(execFile);
 const DEFAULT_OPTIONS: Record<string, string> = { BatchMode: "yes", ConnectTimeout: "10" };
-/** A remote command still running after this many seconds returns as a background job instead of holding the turn. */
-const DEFAULT_WAIT_S = 120;
 /** The tool owns connection sharing; a caller's value would break it. */
 const OWNED = new Set(["controlmaster", "controlpath", "controlpersist"]);
 /** They run local programs or load local code, out of the guards' sight, or replace the command. */
@@ -18,39 +15,30 @@ const REFUSED = new Set(["proxycommand", "localcommand", "permitlocalcommand", "
 const HOST = /^[A-Za-z0-9_.@:[\]-]+$/;
 const OPTION = /^[A-Za-z][A-Za-z0-9]*$/;
 
-const params = Type.Object({
+type SshParams = { options?: Record<string, string | number | boolean>; identity?: string; port?: number; agent_forward?: boolean };
+
+const transferParams = Type.Object({
 	host: Type.String({ description: "Host, user@host, or a Host alias from ~/.ssh/config." }),
-	command: Type.String({ description: "Command for the remote bash, whatever the remote login shell is; one program per call, as with run()." }),
-	cwd: Type.Optional(Type.String({ description: "Remote directory to run in." })),
-	options: Type.Optional(
-		Type.Record(Type.String(), Type.Union([Type.String(), Type.Number(), Type.Boolean()]), {
-			description: "ssh -o options, e.g. { User: \"deploy\", ProxyJump: \"edge\", ConnectTimeout: 5 }. Defaults: BatchMode yes, ConnectTimeout 10.",
+	direction: Type.Union([Type.Literal("upload"), Type.Literal("download")]),
+	local: Type.String({ description: "Local file or directory, relative to the session directory or absolute." }),
+	remote: Type.String({ description: "Remote path; relative paths start in the remote home." }),
+	recursive: Type.Optional(Type.Boolean({ description: "Copy a directory (-r)." })),
+	ssh: Type.Optional(
+		Type.Object({
+			options: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Number(), Type.Boolean()]))),
+			identity: Type.Optional(Type.String()),
+			port: Type.Optional(Type.Number()),
+			agent_forward: Type.Optional(Type.Boolean()),
 		}),
 	),
-	timeout: Type.Optional(Type.Number({ description: `Seconds before the call returns with the command still running in the background (default ${DEFAULT_WAIT_S}); it is not killed.` })),
-	tty: Type.Optional(Type.Boolean({ description: "Allocate a remote pty (-t), for sudo or a program that needs a terminal." })),
-	noStdin: Type.Optional(Type.Boolean({ description: "Never read stdin (-n); ignored when tty is set." })),
-	identity: Type.Optional(Type.String({ description: "Private key file (-i), for a host that is not in ~/.ssh/config." })),
-	port: Type.Optional(Type.Number({ description: "Remote port (-p)." })),
-	agentForward: Type.Optional(Type.Boolean({ description: "Forward the local ssh agent (-A) on the shared connection." })),
-	tail: Type.Optional(Type.Number({ description: "Return only the last N lines; the full output stays in the log file named in `log`." })),
-	background: Type.Optional(Type.Boolean({ description: "Start as a background shell job; tools.shell reads, waits on, or kills it." })),
 });
-type Params = Static<typeof params>;
-
-const outputSchema = Type.Object({
-	output: Type.String({ description: "stdout up to 1 MiB; stderr is the other field and the log holds both." }),
-	truncated: Type.Optional(Type.Boolean()),
-	log: Type.Optional(Type.String()),
-	exit_code: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-	job: Type.Optional(Type.String({ description: "The background job's id." })),
-});
+type TransferParams = Static<typeof transferParams>;
 
 /** Single-quotes `value` for the local bash. */
 export const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 
 /** `-o` arguments: the defaults, then the caller's options, validated. */
-export function sshOptions(options: Params["options"] = {}): string[] {
+export function sshOptions(options: SshParams["options"] = {}): string[] {
 	const merged: Record<string, string> = { ...DEFAULT_OPTIONS };
 	for (const [key, value] of Object.entries(options)) {
 		if (!OPTION.test(key)) throw new Error(`Not an ssh option name: ${key}`);
@@ -66,24 +54,30 @@ export function connectionFlags(input: { identity?: string; port?: number; agent
 	return [...(input.identity ? ["-i", input.identity] : []), ...(input.port ? ["-p", String(input.port)] : []), ...(input.agentForward ? ["-A"] : [])];
 }
 
-/** Options for one session on the connection; a pty and `-n` are alternatives, so the pty wins. */
-export function sessionFlags(input: { tty?: boolean; noStdin?: boolean }): string[] {
-	return input.tty ? ["-t"] : input.noStdin ? ["-n"] : [];
+/**
+ * Options for one session on the connection. A pty needs `-tt`: the local side has no terminal,
+ * and a single `-t` then allocates none. Without stdin to pass, `-n` keeps ssh off it.
+ */
+export function sessionFlags(input: { tty?: boolean; stdin?: boolean }): string[] {
+	return input.tty ? ["-tt"] : input.stdin ? [] : ["-n"];
 }
 
 /**
  * The remote command line: the script travels base64-encoded and runs under bash, so the remote
- * login shell (fish on these hosts) parses nothing but `echo`, `base64`, and `bash`.
+ * login shell (fish on these hosts) parses nothing but `echo`, `base64`, and `bash`. With
+ * `stdin`, the script arrives as an argument so bash's stdin stays the caller's.
  */
-export function remoteCommand(command: string, cwd?: string): string {
+export function remoteCommand(command: string, cwd?: string, stdin = false): string {
 	const script = cwd ? `cd -- ${quote(cwd)} || exit\n${command}` : command;
-	return `echo ${Buffer.from(script).toString("base64")} | base64 -d | bash`;
+	const encoded = Buffer.from(script).toString("base64");
+	return stdin ? `bash -c "$(echo ${encoded} | base64 -d)"` : `echo ${encoded} | base64 -d | bash`;
 }
 
-type Shell = ReturnType<typeof registerShell>;
-
-/** The `ssh` tool: one shared connection per host and option set for the session, commands run as shell jobs. */
-export function registerSsh(pi: ExtensionAPI, shell: Shell) {
+/**
+ * One shared ssh connection per host and option set for the session: `command` gives the local
+ * command line that runs a command over it, and the `transfer` tool copies files over it.
+ */
+export function registerSsh(pi: ExtensionAPI, env: () => Promise<NodeJS.ProcessEnv>, dir: (path?: string) => string) {
 	// Unix socket paths are capped near 104 bytes, so the sockets live in a short directory.
 	const socketDir = `/tmp/pi-ssh-${userInfo().uid}`;
 	const masters = new Map<string, { path: string; host: string; ready: Promise<void> }>();
@@ -96,7 +90,7 @@ export function registerSsh(pi: ExtensionAPI, shell: Shell) {
 	/** Opens the master once; parallel calls wait for it, and a dead one is reopened. */
 	const ensureMaster = (host: string, opts: string[]) => {
 		const { key, path } = control(host, opts);
-		const ssh = async (args: string[]) => exec("ssh", ["-o", `ControlPath=${path}`, ...args], { env: await shell.env(shell.dirOf()) });
+		const ssh = async (args: string[]) => exec("ssh", ["-o", `ControlPath=${path}`, ...args], { env: await env() });
 		const previous = masters.get(key)?.ready ?? Promise.resolve();
 		const ready = previous
 			.catch(() => undefined)
@@ -120,29 +114,47 @@ export function registerSsh(pi: ExtensionAPI, shell: Shell) {
 		for (const { path, host } of masters.values()) {
 			try {
 				execFileSync("ssh", ["-o", `ControlPath=${path}`, "-O", "exit", host], { stdio: "ignore", timeout: 2000 });
-			} catch {}
+			} catch {
+				// The master exited already; ControlPersist ends any that did not.
+			}
 		}
 	});
 
+	const connection = async (host: string, ssh: SshParams = {}) => {
+		if (!HOST.test(host) || host.startsWith("-")) throw new Error(`Not a host: ${host}`);
+		const opts = [...sshOptions(ssh.options), ...connectionFlags({ identity: ssh.identity, port: ssh.port, agentForward: ssh.agent_forward })];
+		return { opts, path: await ensureMaster(host, opts) };
+	};
+
+	const command = async (input: { host: string; command: string; cwd?: string; tty?: boolean; stdin?: boolean; ssh?: SshParams }) => {
+		const { opts, path } = await connection(input.host, input.ssh);
+		return ["ssh", ...opts, ...sessionFlags(input), "-o", "ControlMaster=no", "-o", `ControlPath=${path}`, "--", input.host, remoteCommand(input.command, input.cwd, input.stdin)]
+			.map(quote)
+			.join(" ");
+	};
+
 	pi.registerTool({
-		name: "ssh",
-		label: "SSH",
-		description:
-			"Run a command on a remote host over one shared connection per host for the session, so parallel calls under settle() are cheap. The command runs under bash on the remote whatever its login shell, so it needs no extra quoting. Runs as a shell job: a log, tail, and background like run(). Scripts get { output, exit_code, log, truncated }.",
-		promptSnippet: "Run remote commands over a shared ssh connection",
-		parameters: params,
-		outputSchema,
+		name: "transfer",
+		label: "Transfer",
+		description: "Copy a file or directory to (upload) or from (download) a host over the session's shared ssh connection, with scp. Scripts get { output }.",
+		promptSnippet: "Copy files to or from a host over the shared ssh connection",
+		parameters: transferParams,
 		exposure: "codemode",
-		async execute(_id, input: Params, signal, onUpdate) {
-			if (!HOST.test(input.host) || input.host.startsWith("-")) throw new Error(`Not a host: ${input.host}`);
-			const opts = [...sshOptions(input.options), ...connectionFlags(input)];
-			const path = await ensureMaster(input.host, opts);
-			const command = ["ssh", ...opts, ...sessionFlags(input), "-o", "ControlMaster=no", "-o", `ControlPath=${path}`, "--", input.host, remoteCommand(input.command, input.cwd)]
-				.map(quote)
-				.join(" ");
-			const label = `ssh ${input.host}${input.cwd ? ` (in ${input.cwd})` : ""}: ${input.command}`;
-			if (input.background) return shell.background(command, label);
-			return shell.waitStart(command, { seconds: input.timeout ?? DEFAULT_WAIT_S, label, tail: input.tail, signal, onUpdate });
+		async execute(_id, input: TransferParams, signal) {
+			// The port goes as scp's -P, so only the connection's -o options and key pass through here.
+			const { opts, path } = await connection(input.host, input.ssh);
+			const scpOpts = opts.flatMap((arg, i, all) => (arg === "-p" ? ["-P", all[i + 1] ?? ""] : all[i - 1] === "-p" ? [] : arg === "-A" ? [] : [arg]));
+			const local = dir(input.local.replace(/^@/, ""));
+			const remote = `${input.host}:${input.remote}`;
+			const [from, to] = input.direction === "upload" ? [local, remote] : [remote, local];
+			const { stdout, stderr } = await exec("scp", [...scpOpts, ...(input.recursive ? ["-r"] : []), "-o", "ControlMaster=no", "-o", `ControlPath=${path}`, "--", from, to], {
+				env: await env(),
+				signal,
+			});
+			const output = `${input.direction === "upload" ? "Uploaded" : "Downloaded"} ${from} -> ${to}${(stdout + stderr).trim() ? `\n${(stdout + stderr).trim()}` : ""}`;
+			return { content: [{ type: "text", text: output }], details: undefined, structuredContent: { output } };
 		},
 	});
+
+	return { command };
 }

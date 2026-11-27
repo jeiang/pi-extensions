@@ -9,6 +9,7 @@ import { type Static, Type } from "typebox";
 import { lastCheckpoint } from "../checkpoint/index.ts";
 import { addUsage } from "../footer/cost.ts";
 import { untilInterrupt } from "./interrupt.ts";
+import { claimed, trackJob } from "./jobs.ts";
 
 const DEFAULT_MAX_CONCURRENT = 3;
 const DEFAULT_TIMEOUT_S = 30 * 60;
@@ -420,20 +421,25 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (input.resume && !(sessionDir && sessionExists(sessionDir, input.resume)))
 				throw new Error(`No child session ${input.resume} to resume; children live in ${sessionDir ?? "no directory, because this session is unsaved"}.`);
 			const session = input.resume ?? randomUUID();
-			const report = (result: ReturnType<typeof run>) =>
+			const report = (result: ReturnType<typeof run>) => {
+				const kill = () => [...children.values()].find((child) => child.session === session)?.kill();
+				trackJob(session, "subagent", `${agent.name}: ${task.split("\n")[0]?.slice(0, 80)}`, result, kill);
 				void result.then(
 					(done) => wake(done.failed ? `Subagent (session ${session}) ${done.text}` : `Subagent ${agent.name} finished (session ${session}):\n${done.text}`, done.failed, done.usage),
 					(error: Error) => wake(`Subagent ${agent.name} failed (session ${session}): ${error.message}`, true, undefined),
 				);
-			const wake = (content: string, error: boolean, usage: Usage | undefined) => {
-				if (closed) return;
-				pi.sendMessage({ customType: "subagent", content, display: true, details: { error, usage } }, { triggerTurn: true, deliverAs: "steer" });
 			};
+			// The wake waits a moment, so a job wait that returned the result claims it first.
+			const wake = (content: string, error: boolean, usage: Usage | undefined) =>
+				setTimeout(() => {
+					if (closed || claimed(session)) return;
+					pi.sendMessage({ customType: "subagent", content, display: true, details: { error, usage } }, { triggerTurn: true, deliverAs: "steer" });
+				}, 200);
 			if (input.background) {
 				// A background child outlives the tool call, so the call's signal does not cancel it.
 				report(run(agent, task, sessionDir, session, undefined, undefined, input.timeout));
 				return text(
-					`Launched ${agent.name} in the background as session ${session}; status with { action: "status", session: "${session}" } shows what it is doing, kill stops it, and you are woken with its result or failure.`,
+					`Launched ${agent.name} in the background as session ${session}; status with { action: "status", session: "${session}" } shows what it is doing, job waits on it as ${session}, kill stops it, and you are woken with its result or failure.`,
 					agent.name,
 					"background",
 					session,

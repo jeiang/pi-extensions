@@ -140,10 +140,23 @@ export async function direnvAllowed(dir: string): Promise<boolean> {
 	}
 }
 
-export async function resolveDevshell(cwd: string): Promise<Devshell | undefined> {
+/** The devshell governing `cwd`; `name` picks a named devshell of its flake (`nix develop .#<name>`). */
+export async function resolveDevshell(cwd: string, name?: string): Promise<Devshell | undefined> {
 	const root = findRoot(cwd);
-	if (!root) return undefined;
+	if (!root) {
+		if (name) throw new Error(`No flake governs ${cwd}, so it has no devshell ${name}.`);
+		return undefined;
+	}
 	const has = (file: string) => existsSync(join(root, file));
+	if (name) {
+		if (!has("flake.nix")) throw new Error(`${root} has no flake.nix, so it has no devshell ${name}.`);
+		const key = fingerprint(root, ["flake.nix", "flake.lock"]);
+		const env = await cached(`flake-develop-${name}-${key}`, async () => {
+			const { stdout } = await run("nix", ["develop", `.#${name}`, "--ignore-environment", "--command", "env", "-0"], { cwd: root, maxBuffer: 64 * 1024 * 1024 });
+			return fromNulEnv(stdout);
+		});
+		return { root, kind: "flake", env };
+	}
 	if (has("devenv.nix")) {
 		const key = fingerprint(root, ["devenv.nix", "devenv.yaml", "devenv.lock"]);
 		const env = await cached(`devenv-${key}`, async () => {

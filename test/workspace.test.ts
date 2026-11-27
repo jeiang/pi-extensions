@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { cacheUsable, fromNulEnv } from "../extensions/workspace/devshell.ts";
 import workspace from "../extensions/workspace/index.ts";
-import { grepRoute, jobCommand, lastLines, progressBar, ttyCommand, ttyOutput, waitBound } from "../extensions/workspace/shell.ts";
+import { jobCommand, lastLines, progressBar, ttyCommand, ttyOutput, waitBound } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents, sessionDigest, sessionExists, sessionTail } from "../extensions/workspace/subagent.ts";
 import { carryChanges, createWorktree, fastForwardBranch, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
@@ -30,8 +30,8 @@ async function session(cwd: string, replies: Reply[]) {
 		extensions: [scriptedProviders((_m, _c, i) => replies[i] ?? { text: "done" }, calls), workspace],
 		model: ["p1", "m"],
 		cwd,
-		// shell is codemode-only; activating it declares it, as for a subagent that lists it.
-		settings: { defaultTools: ["+shell"] },
+		// run is codemode-only; activating it declares it, as for a subagent that lists it.
+		settings: { defaultTools: ["+run"] },
 	});
 	return { session, calls };
 }
@@ -61,7 +61,7 @@ test("a repository made during the session gets worktrees but no write block", a
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "ws-new-")));
 	const init = "git init -q -b main && git -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init";
 	const { session: s } = await session(dir, [
-		{ tool: "bash", args: { command: init } },
+		{ tool: "run", args: { command: init } },
 		{ tool: "write", args: { path: "a.txt", content: "a\n" } },
 		{ tool: "worktree", args: { action: "create", name: "proto" } },
 		{ tool: "write", args: { path: "b.txt", content: "b\n" } },
@@ -79,7 +79,7 @@ test("a nested clone in the main checkout is neither blocked nor remapped; a sub
 	writeFileSync(join(dir, "mod", ".git"), "gitdir: ../.git/modules/mod\n");
 	const { session: s } = await session(dir, [
 		{ tool: "write", args: { path: "mod/c.txt", content: "c\n" } },
-		{ tool: "bash", args: { command: "git init -q nested" } },
+		{ tool: "run", args: { command: "git init -q nested" } },
 		{ tool: "write", args: { path: "nested/a.txt", content: "a\n" } },
 		{ tool: "worktree", args: { action: "create", name: "wt" } },
 		{ tool: "write", args: { path: join(dir, "nested", "b.txt"), content: "b\n" } },
@@ -128,7 +128,7 @@ test("a session removes its worktree, is blocked again, and enters or creates an
 	const { session: s } = await session(dir, [
 		{ tool: "worktree", args: { action: "create", name: "first" } },
 		{ tool: "write", args: { path: "a.txt", content: "a\n" } },
-		{ tool: "bash", args: { command: "git add a.txt && git commit -qm a" } },
+		{ tool: "run", args: { command: "git add a.txt && git commit -qm a" } },
 		{ tool: "worktree", args: { action: "remove" } },
 		{ tool: "write", args: { path: "b.txt", content: "b\n" } },
 		{ tool: "worktree", args: { action: "enter", name: "first" } },
@@ -253,7 +253,7 @@ test("exit removes a worktree the session started in, deletes its merged branch,
 	const { session: s } = await session(wt.path, [
 		{ tool: "worktree", args: { action: "exit" } },
 		{ tool: "worktree", args: { action: "list" } },
-		{ tool: "bash", args: { command: "pwd" } },
+		{ tool: "run", args: { command: "pwd" } },
 	]);
 	await s.prompt("leave");
 	s.dispose();
@@ -281,7 +281,7 @@ test("exit removes a worktree the session created and returns to the main checko
 	const { session: s } = await session(dir, [
 		{ tool: "worktree", args: { action: "create", name: "exit-own" } },
 		{ tool: "worktree", args: { action: "exit" } },
-		{ tool: "bash", args: { command: "pwd" } },
+		{ tool: "run", args: { command: "pwd" } },
 	]);
 	await s.prompt("leave");
 	s.dispose();
@@ -293,8 +293,8 @@ test("exit removes a worktree the session created and returns to the main checko
 test("a background job returns at the first matching line and keeps running", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "ws-shell-"));
 	const { session: s } = await session(dir, [
-		{ tool: "shell", args: { command: "echo starting; echo READY; sleep 5; echo late", background: true, wait_on: "READY" } },
-		{ tool: "shell", args: { action: "kill", job: "job1" } },
+		{ tool: "run", args: { command: "echo starting; echo READY; sleep 5; echo late", background: true, wait_on: "READY" } },
+		{ tool: "job", args: { action: "kill", job: "job1" } },
 	]);
 	const started = Date.now();
 	await s.prompt("serve");
@@ -310,8 +310,8 @@ test("killing a tty job kills the pty's own session, not only the outer shell", 
 	const dir = mkdtempSync(join(tmpdir(), "ws-tty-"));
 	const pidFile = join(dir, "child.pid");
 	const { session: s } = await session(dir, [
-		{ tool: "shell", args: { command: `trap '' HUP; echo $$ > '${pidFile}'; sleep 60`, background: true, tty: true, wait_seconds: 1 } },
-		{ tool: "shell", args: { action: "kill", job: "job1" } },
+		{ tool: "run", args: { command: `trap '' HUP; echo $$ > '${pidFile}'; sleep 60`, background: true, tty: true, wait_seconds: 1 } },
+		{ tool: "job", args: { action: "kill", job: "job1" } },
 	]);
 	await s.prompt("serve");
 	s.dispose();
@@ -324,7 +324,7 @@ test("an absolute cwd runs where it names, not in the worktree", async () => {
 	const dir = repo();
 	const { session: s } = await session(dir, [
 		{ tool: "worktree", args: { action: "create", name: "cwd" } },
-		{ tool: "bash", args: { command: "pwd", cwd: dir } },
+		{ tool: "run", args: { command: "pwd", cwd: dir } },
 	]);
 	await s.prompt("check");
 	s.dispose();
@@ -357,15 +357,6 @@ test("a devshell env from nix develop drops the shell's own variables", () => {
 test("tail reports truncated only when it left output out", () => {
 	assert.deepEqual(lastLines("a\nb\nc\n", 20), { content: "a\nb\nc", truncated: false });
 	assert.deepEqual(lastLines("a\nb\nc\n", 2), { content: "b\nc", truncated: true });
-});
-
-test("grepRoute serves plain rg and grep calls only", () => {
-	assert.deepEqual(grepRoute("rg -i 'foo bar' src"), { ignoreCase: true, pattern: "foo bar", path: "src" });
-	assert.deepEqual(grepRoute("grep -rn TODO ."), { pattern: "TODO", path: "." });
-	assert.equal(grepRoute("rg foo | head"), undefined);
-	assert.equal(grepRoute("grep foo"), undefined);
-	assert.equal(grepRoute("rg --json foo"), undefined);
-	assert.equal(grepRoute("rg $PAT"), undefined);
 });
 
 test("a child's transcript tail shows its last text, tool calls, and results", () => {
@@ -434,7 +425,7 @@ test("the digest tells a throwaway child where the session stands", () => {
 				role: "assistant",
 				content: [
 					{ type: "toolCall", name: "edit", input: { input: "[src/a.ts#ABCD]\nPUT 1.=1:\n+x" } },
-					{ type: "toolCall", name: "shell", input: { command: "bun test" } },
+					{ type: "toolCall", name: "run", input: { command: "bun test" } },
 				],
 			},
 		},
@@ -443,7 +434,7 @@ test("the digest tells a throwaway child where the session stands", () => {
 	assert.match(digest, /Checkpoint:\ndone: x/);
 	assert.match(digest, /Last request from the user:\nwire the parser/);
 	assert.match(digest, /edit src\/a\.ts/);
-	assert.match(digest, /shell bun test/);
+	assert.match(digest, /run bun test/);
 	assert.match(digest, /Files touched:\nsrc\/a\.ts/);
 	assert.match(digest, /is the parser wired\?$/);
 });
@@ -460,10 +451,9 @@ test("a pty's EOF marker and CRLF leave the output", () => {
 });
 
 test("a pty job keeps the stderr redirect inside the pty", () => {
-	const plain = jobCommand("ls", "/tmp/e", false);
-	assert.equal(plain, "{ ls\n} 2> '/tmp/e'");
-	// The same redirect, inside script(1), so stderr never reaches the pty stream.
-	assert.equal(jobCommand("ls", "/tmp/e", true), ttyCommand(plain));
+	assert.equal(jobCommand("ls", "/tmp/e", true), ttyCommand("{ ls\n} 2> '/tmp/e'"));
+	// Without a pty, sudo fails at once instead of waiting for a password; stdin comes from a file.
+	assert.equal(jobCommand("ls", "/tmp/e", false, undefined, "/tmp/in"), `{ sudo() { command sudo -n "$@"; }\nls\n} 2> '/tmp/e' < '/tmp/in'`);
 });
 test("a wait with no selector is bounded, and a selector is not", () => {
 	assert.equal(waitBound({}), 120);
@@ -483,7 +473,7 @@ test("progressBar reads build steps and percentages", () => {
 
 test("a carriage-return progress line updates in place in the live view", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "ws-live-"));
-	const { session: s } = await session(dir, [{ tool: "shell", args: { command: "printf 'start\\n10%%\\r50%%\\r'; sleep 0.3; printf '100%%\\ndone\\n'" } }]);
+	const { session: s } = await session(dir, [{ tool: "run", args: { command: "printf 'start\\n10%%\\r50%%\\r'; sleep 0.3; printf '100%%\\ndone\\n'" } }]);
 	const views: string[] = [];
 	s.subscribe((event) => {
 		if (event.type === "tool_execution_update") views.push(event.partialResult.content[0]?.text ?? "");

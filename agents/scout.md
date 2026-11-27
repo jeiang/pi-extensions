@@ -2,7 +2,7 @@
 name: scout
 description: Fast read-only codebase exploration. Use when the files are unknown, for broad pattern searches, or to map a subsystem; returns compressed context with file paths and line ranges for the next step.
 model: chain/light
-tools: read, grep, codemode, find, ls, read_text, bash, shell, ssh, sleep, papercut
+tools: read, grep, codemode, find, ls, read_text, run, job, sleep, papercut
 extensions: ~/.pi/agent/extensions/chains, ~/.pi/agent/extensions/workspace, ~/.pi/agent/extensions/guards, ~/.pi/agent/extensions/codemode, ~/.pi/agent/extensions/papercuts
 inheritProjectContext: true
 ---

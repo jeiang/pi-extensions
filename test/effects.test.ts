@@ -35,7 +35,10 @@ test("calls outside the filesystem are either known to change state or opaque", 
 	assert.equal(kind("github", { op: "pr_view" }), "read");
 	assert.equal(kind("worktree", { action: "create", name: "x" }), "mutate");
 	assert.equal(kind("worktree", { action: "list" }), "read");
-	for (const tool of ["shell", "codemode", "ssh", "subagent"]) assert.equal(kind(tool, { command: "rm -rf /" }), "opaque", tool);
+	for (const tool of ["run", "codemode", "subagent"]) assert.equal(kind(tool, { command: "rm -rf /" }), "opaque", tool);
+	assert.equal(kind("job", { action: "wait", job: "job1" }), "read");
+	assert.equal(kind("job", { action: "kill", job: "job1" }), "opaque");
+	assert.equal(kind("transfer", { host: "h", direction: "upload", local: "a", remote: "b" }), "opaque");
 });
 
 test("an unrecognized tool that names a path counts as a write", () => {

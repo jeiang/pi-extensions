@@ -9,6 +9,7 @@ import { type Static, Type } from "typebox";
 import { formatDuration } from "../turn-time/index.ts";
 import { sessionDir } from "../workspace/cwd.ts";
 import { registerInterrupt, untilInterrupt } from "../workspace/interrupt.ts";
+import { claimed, trackJob } from "../workspace/jobs.ts";
 
 const run = promisify(execFile);
 const POLL_MS = 15_000;
@@ -238,8 +239,13 @@ export default function (pi: ExtensionAPI) {
 			};
 			const outcome = await untilInterrupt(id, signal, (own, attached) => watch(AbortSignal.any([own, shutdown.signal]), attached));
 			if ("value" in outcome) return outcome.value;
+			// The wake waits a moment, so a job wait that returned the result claims it first.
 			const wake = (content: string, error: boolean) =>
-				pi.sendMessage({ customType: "github", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
+				setTimeout(() => {
+					if (!claimed(id)) pi.sendMessage({ customType: "github", content, display: true, details: { error } }, { triggerTurn: true, deliverAs: "steer" });
+				}, 200);
+			const textOf = (result: { content: { type: string; text?: string }[] }) => result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+			trackJob(id, "ci watch", `run_watch ${input.run ?? input.ref ?? "HEAD"}`, outcome.background.then((result) => ({ text: textOf(result), failed: Boolean(result.isError) })));
 			void outcome.background.then(
 				(result) => {
 					if (shutdown.signal.aborted) return;
@@ -248,7 +254,7 @@ export default function (pi: ExtensionAPI) {
 				(error: Error) => wake(`CI watch failed: ${error.message}`, true),
 			);
 			return {
-				content: [{ type: "text", text: "The user interrupted; still watching CI in the background. You are woken with the outcome." }],
+				content: [{ type: "text", text: `The user interrupted; still watching CI in the background. You are woken with the outcome, or job waits on it as ${id}.` }],
 				details: { runs: [] },
 				structuredContent: { op: "run_watch", conclusion: "background" },
 			};

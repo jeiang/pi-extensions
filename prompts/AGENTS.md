@@ -70,8 +70,9 @@ Commands run inside `codemode`: the script is the program and each
 `run()` runs one external program. Put independent commands in parallel
 under `settle()`, each with its own exit code and output; filter, count,
 and join their output in JS, and keep intermediate data in variables
-rather than `/tmp` files. Use `tools.shell` from a script for background
-jobs. Write a script file only when it will be run again.
+rather than `/tmp` files. A run() past `wait_seconds`, or with
+`background: true`, returns a job handle; `job` waits on it, reads it, or
+kills it. Write a script file only when it will be run again.
 
 Prefer the tool to the shell habit: `read` with `ranges` or a negative
 `offset` over `sed -n`, `cat`, or `tail`; `grep` over `grep -rn`;
@@ -121,7 +122,7 @@ rasterize a diagram to show it.
 # Environment
 
 zakkart is macOS with nix-darwin; artemis and the servers are NixOS. Run
-remote commands with `tools.ssh`: it runs them under bash, though the login
-shell is fish, and shares one connection per host.
+remote commands with `run(cmd, { host })`: it runs them under bash, though
+the login shell is fish, and shares one connection per host.
 Ad hoc tools come from `nix shell` or `nix run`; add a tool a repository
 reuses to its devshell.
