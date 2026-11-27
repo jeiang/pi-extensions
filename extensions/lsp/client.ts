@@ -19,6 +19,7 @@ import type { ServerDef, Timeouts } from "./config.ts";
 
 const MAX_OPEN = 100;
 const STDERR_TAIL = 4096;
+const CLEAR_WAIT_MS = 500;
 /** Requests that cover the whole workspace get the longer budget. */
 const WORKSPACE_METHODS = new Set([
 	"textDocument/references",
@@ -362,7 +363,10 @@ export class LspClient {
 			if (signal?.aborted) throw new LspError("aborted");
 			// typescript-language-server publishes nothing when a clean file stays clean; reopening makes it report the file.
 			if (quiet && this.docs.get(doc.uri)?.version === doc.version) {
+				// A server may clear a closed file's diagnostics; that push must land before the reopen, or it would read as the answer.
+				const cleared = this.nextPush(doc.uri, CLEAR_WAIT_MS);
 				await this.close(path);
+				await cleared;
 				return this.diagnostics(path, languageId, signal, after, true);
 			}
 			if (!provider && this.docs.get(doc.uri)?.version === doc.version) this.silent.set(doc.uri, doc.version);
@@ -370,6 +374,21 @@ export class LspClient {
 		} finally {
 			done.abort();
 		}
+	}
+
+	/** Resolves at the next push for `uri`, or after `ms`. */
+	private nextPush(uri: string, ms: number): Promise<void> {
+		return new Promise((done) => {
+			const set = this.waiters.get(uri) ?? new Set();
+			const finish = () => {
+				clearTimeout(timer);
+				set.delete(finish);
+				done();
+			};
+			const timer = setTimeout(finish, ms);
+			set.add(finish);
+			this.waiters.set(uri, set);
+		});
 	}
 
 	private async pull(uri: string, identifier: string | undefined, signal: AbortSignal): Promise<DiagnosticsResult> {
