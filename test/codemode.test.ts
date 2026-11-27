@@ -3,9 +3,22 @@ import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import codemode from "../extensions/codemode/index.ts";
 import workspace from "../extensions/workspace/index.ts";
 import { createTestSession, type Reply, scriptedProviders } from "./harness.ts";
+
+/** A tool with an op that is registered but inactive, so scripts do not see it. */
+const inactive = (pi: ExtensionAPI) =>
+	pi.registerTool({
+		name: "inactive",
+		label: "Inactive",
+		description: "Off by default.",
+		parameters: Type.Object({ op: Type.String({ enum: ["get"] }) }),
+		defaultActive: false,
+		execute: async () => ({ content: [], details: undefined }),
+	});
 
 /** Runs `code` as the first tool call; `then` is the second call, so a background script can finish meanwhile. */
 async function script(code: string, then?: Reply) {
@@ -21,6 +34,7 @@ async function script(code: string, then?: Reply) {
 			}, []),
 			workspace,
 			codemode,
+			inactive,
 		],
 		model: ["p1", "m"],
 		cwd: dir,

@@ -94,7 +94,7 @@ export function opMethods(list: { name: string; parameters?: unknown }[]): strin
 			const id = name.replace(/[^\w$]/g, "_");
 			if (values.length === 0 || !identifier.test(id)) return [];
 			const methods = values.map((value) => `tools.${id}.${value} = (a = {}) => tools.${id}({ ...a, ${key}: ${JSON.stringify(value)} });`).join(" ");
-			return [`if (typeof tools.${id} === "function") { ${methods} }`];
+			return [`if ("${id}" in tools) { ${methods} }`];
 		})
 		.join(" ");
 }
