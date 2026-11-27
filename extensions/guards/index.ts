@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { previewPaths } from "../lsp/edits.ts";
 import { sessionDir } from "../workspace/cwd.ts";
 
 interface Rule {
@@ -269,6 +270,15 @@ export default function (pi: ExtensionAPI) {
 				const folder = restrictedFolder(path, sessionDir(ctx));
 				if (!folder || (reads && readableFolder(folder))) continue;
 				const verdict = await ask(ctx, `Allow ${event.toolName} in ${folder}?`, path);
+				if (!verdict.allowed) return block(verdict.why, `${folder} is restricted.`);
+			}
+		}
+		if (enabled && event.toolName === "lsp" && input.apply && typeof input.token === "string") {
+			// An lsp apply writes the files its preview named, sources and destinations of a move included.
+			for (const path of previewPaths(input.token) ?? []) {
+				const folder = restrictedFolder(path, sessionDir(ctx));
+				if (!folder) continue;
+				const verdict = await ask(ctx, `Allow lsp apply in ${folder}?`, path);
 				if (!verdict.allowed) return block(verdict.why, `${folder} is restricted.`);
 			}
 		}

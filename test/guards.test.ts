@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import codemode from "../extensions/codemode/index.ts";
 import guards, { branchSwitch, commandViolation, maskSecrets, restrictedFolder, switchesBranch, switchViolation, writesInto } from "../extensions/guards/index.ts";
+import lsp from "../extensions/lsp/index.ts";
+import { storePreview } from "../extensions/lsp/edits.ts";
 import workspace from "../extensions/workspace/index.ts";
 import { createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
@@ -133,6 +135,26 @@ test("a script reads /etc freely, but a write there and a read of ~/.ssh are blo
 	assert.match(results[0] ?? "", /~\/\.ssh is restricted/);
 	assert.match(results[0] ?? "", /transfer: No user is attached to approve it\. ~\/\.ssh is restricted/);
 	assert.match(results[0] ?? "", /empty host: No user is attached to approve it\. ~\/\.ssh is restricted/);
+});
+
+test("an lsp apply that writes into a restricted folder is blocked without a user to ask", async () => {
+	const preview = storePreview("test", [{ path: "/etc/pi-guard-test", before: undefined, after: "x\n", edits: 1 }]);
+	const results: string[] = [];
+	const { session } = await createTestSession({
+		extensions: [
+			scriptedProviders((_m, context, i): Reply => {
+				const last = context.messages.at(-1);
+				if (last?.role === "toolResult") results.push(last.content.map((c) => (c.type === "text" ? c.text : "")).join("\n"));
+				return i === 0 ? { tool: "lsp", args: { op: "rename", apply: true, token: preview.token } } : { text: "done" };
+			}, []),
+			guards,
+			lsp,
+		],
+		model: ["p1", "m"],
+	});
+	await session.prompt("go");
+	session.dispose();
+	assert.match(results[0] ?? "", /\/etc is restricted/);
 });
 
 test("masks secrets and keeps other text", () => {

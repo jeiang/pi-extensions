@@ -32,6 +32,7 @@ const outputSchema = Type.Object({
 	searched: Type.Number(),
 	files: Type.Array(Type.Object({ path: Type.String(), count: Type.Number(), samples: Type.Array(sample) })),
 	note: Type.Optional(Type.String()),
+	diagnostics: Type.Optional(Type.String({ description: "After apply: new language-server findings in the changed files." })),
 });
 type Output = Static<typeof outputSchema>;
 type Params = Static<typeof params>;

@@ -17,6 +17,7 @@ import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devsh
 import { structuredGrep } from "./grep.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerInterrupt } from "./interrupt.ts";
+import { shareEditStore } from "./mutation.ts";
 import { readTextTool, structuredFind, structuredLs } from "./listing.ts";
 import { registerShell } from "./shell.ts";
 import { registerSsh } from "./ssh.ts";
@@ -108,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 
 	const switchTo = (ctx: ExtensionContext, next: Worktree | undefined) => {
 		worktree = next;
-		setSessionDir(ctx, next?.path);
+		setSessionDir(ctx, next?.path, repo?.root);
 		pi.appendEntry(ENTRY, next ?? { main: sessionCwd });
 		if (next && ctx.hasUI) ctx.ui.notify(`Worktree ${next.path} on ${next.branch}`, "info");
 	};
@@ -128,17 +129,13 @@ export default function (pi: ExtensionAPI) {
 					Object.assign(input, { input: input.input.replace(/\[([^\]#\n]+)#/g, (_m, path: string) => `[${remapPath(path, root, target)}#`) });
 				}
 				const dir = cwd();
-				const result = await factory(dir).execute(id, input, signal, onUpdate, inCwd(ctx, dir));
-				// Hooks such as pi-lsp's and pi-lens's read the path a tool reports through its call input,
-				// and resolve a relative one against the main checkout.
-				if ("path" in input && typeof input.path === "string")
-					Object.assign(params, { path: worktree ? resolve(dir, input.path) : input.path });
-				return result;
+				return factory(dir).execute(id, input, signal, onUpdate, inCwd(ctx, dir));
 			},
 		});
 	};
 
 	const store = new EditStore();
+	shareEditStore(store);
 	const hashline = hashlineTools(store);
 	override(hashline.read);
 	override(hashline.edit);
@@ -209,7 +206,7 @@ export default function (pi: ExtensionAPI) {
 			setSessionDir(ctx, data.main);
 		} else {
 			worktree = data && "path" in data && existsSync(data.path) ? data : undefined;
-			setSessionDir(ctx, worktree?.path);
+			setSessionDir(ctx, worktree?.path, repo?.root);
 		}
 	});
 
@@ -223,15 +220,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", (event, ctx) => {
 		if (worktree && !existsSync(worktree.path)) switchTo(ctx, undefined);
 		const input: Record<string, unknown> = event.input;
-		if (event.toolName.startsWith("lsp_")) {
-			// pi-lsp resolves paths against the session cwd, which is still the main checkout.
-			if (!worktree) return;
-			for (const key of ["file_path", "root_path"]) {
-				const value = input[key];
-				if (typeof value === "string" && !value.includes("://")) input[key] = resolve(worktree.path, String(remap(value)));
-			}
-			return;
-		}
 		if (!needsWorktree()) return;
 		const effect = effectsOf(event.toolName, input, cwd());
 		if (effect.kind === "write" && effect.paths.some(inMainCheckout)) return { block: true, reason: NEEDS_WORKTREE };

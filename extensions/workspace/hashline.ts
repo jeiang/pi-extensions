@@ -20,6 +20,7 @@ import {
 	hashlineFormatHeader,
 	hashlineFormatNumberedLines,
 } from "@oh-my-pi/pi-natives";
+import { symbolLines } from "../lsp/bridge.ts";
 import { withFileLocks } from "./mutation.ts";
 import { type Static, Type } from "typebox";
 
@@ -36,6 +37,7 @@ const readParams = Type.Object({
 			description: "Several 1-based inclusive line ranges of the file in one read, instead of offset/limit.",
 		}),
 	),
+	symbol: Type.Optional(Type.String({ description: "A declaration's lines instead of offset/limit, found by the language server: foo, Class.method, or foo#2." })),
 });
 
 const editParams = Type.Object({
@@ -172,8 +174,6 @@ async function applyEditNow(store: EditStore, cwd: string, mode: "hashline" | "r
 			return writeRequest(request);
 		});
 		const first = outcome.files[0];
-		// pi-lsp attaches diagnostics to edit results through `input.path`.
-		if (first) Object.assign(input, { path: first.path });
 		return {
 			content: [{ type: "text" as const, text: outcome.text }],
 			details: {
@@ -234,7 +234,9 @@ export function hashlineTools(store: EditStore) {
 					const absolute = resolve(cwd, input.path.replace(/^@/, ""));
 					const info = await stat(absolute);
 					if (IMAGE.test(extname(absolute)) || info.isDirectory()) return builtin.execute(id, input, signal, onUpdate, ctx);
-					return { content: [{ type: "text", text: await hashlineRead(store, cwd, input, fullReads) }], details: undefined };
+					const lines = input.symbol ? await symbolLines(ctx, absolute, input.symbol) : undefined;
+					const request = lines ? { path: input.path, ranges: [lines] } : input;
+					return { content: [{ type: "text", text: await hashlineRead(store, cwd, request, fullReads) }], details: undefined };
 				},
 			};
 		},

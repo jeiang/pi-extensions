@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import github from "../extensions/github/index.ts";
 import goal from "../extensions/goal/index.ts";
+import lsp from "../extensions/lsp/index.ts";
 import nix from "../extensions/nix/index.ts";
 import papercuts from "../extensions/papercuts/index.ts";
 import plan from "../extensions/plan/index.ts";
@@ -26,7 +27,7 @@ function registered(extension: (pi: never) => void): { name: string; description
 }
 
 // A hidden tool withdraws one of pi's; nothing calls it, so it needs no doc.
-const ours = [workspace, github, nix, plan, goal, papercuts, toolDocs].flatMap(registered).filter((tool) => tool.exposure !== "hidden");
+const ours = [workspace, github, nix, plan, goal, papercuts, toolDocs, lsp].flatMap(registered).filter((tool) => tool.exposure !== "hidden");
 
 test("every tool these extensions register has a doc with its purpose, habits, and examples", () => {
 	const docs = loadDocs();
