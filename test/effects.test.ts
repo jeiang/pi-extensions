@@ -33,6 +33,8 @@ test("file tools write the paths they name", () => {
 test("calls outside the filesystem are either known to change state or opaque", () => {
 	assert.equal(kind("github", { op: "pr_merge", method: "squash" }), "mutate");
 	assert.equal(kind("github", { op: "pr_view" }), "read");
+	for (const op of ["pr_comment", "pr_close", "pr_edit", "workflow_run"]) assert.equal(kind("github", { op }), "mutate", op);
+	for (const op of ["pr_watch", "run_log", "repo_file", "api"]) assert.equal(kind("github", { op }), "read", op);
 	assert.equal(kind("worktree", { action: "create", name: "x" }), "mutate");
 	assert.equal(kind("worktree", { action: "list" }), "read");
 	for (const tool of ["run", "codemode", "subagent"]) assert.equal(kind(tool, { command: "rm -rf /" }), "opaque", tool);

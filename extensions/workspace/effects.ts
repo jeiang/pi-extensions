@@ -16,6 +16,9 @@ export type Effect =
 	/** A call that may act and cannot be classified: run, codemode, a subagent. */
 	| { kind: "opaque" };
 
+/** The github ops that change something on GitHub. */
+const GITHUB_WRITES = new Set(["pr_create", "pr_merge", "pr_comment", "pr_close", "pr_edit", "workflow_run"]);
+
 const READ: Effect = { kind: "read" };
 const MUTATE: Effect = { kind: "mutate" };
 const OPAQUE: Effect = { kind: "opaque" };
@@ -64,7 +67,7 @@ export function effectsOf(tool: string, input: Record<string, unknown>, cwd: str
 			return { kind: "write", paths: (paths.length > 0 ? paths : ["."]).map((path) => resolve(cwd, path.replace(/^@/, ""))) };
 		}
 		case "github":
-			return input.op === "pr_create" || input.op === "pr_merge" ? MUTATE : READ;
+			return typeof input.op === "string" && GITHUB_WRITES.has(input.op) ? MUTATE : READ;
 		case "worktree":
 			return input.action === "list" ? READ : MUTATE;
 		case "job":
