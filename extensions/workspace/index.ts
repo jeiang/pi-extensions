@@ -10,7 +10,7 @@ import { EditStore } from "@oh-my-pi/pi-natives";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Static, type TObject, Type } from "typebox";
-import { restrictedFolder } from "../guards/index.ts";
+import { readableFolder, restrictedFolder } from "../guards/index.ts";
 import { setSessionDir } from "./cwd.ts";
 import { effectsOf } from "./effects.ts";
 import { applyEnv, type Devshell, devshellStamp, resolveDevshell } from "./devshell.ts";
@@ -139,7 +139,7 @@ export default function (pi: ExtensionAPI) {
 			if (needsWorktree() && inMainCheckout(absolute)) return NEEDS_WORKTREE;
 			// guards asks the user about restricted folders named in paths; one reached only by expanding a directory was never asked about.
 			const folder = restrictedFolder(absolute, cwd());
-			if (!folder || input.paths?.some((path) => restrictedFolder(path, cwd()) === folder)) return undefined;
+			if (!folder || (!input.apply && readableFolder(folder)) || input.paths?.some((path) => restrictedFolder(path, cwd()) === folder)) return undefined;
 			return `${folder} is restricted; name it in paths so the user is asked.`;
 		}),
 	);
