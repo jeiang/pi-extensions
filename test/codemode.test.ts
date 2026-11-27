@@ -34,18 +34,52 @@ async function script(code: string, then?: Reply) {
 }
 
 test("the wrapped codemode lists the helpers and runs them after an options line", async () => {
-	const ok = await script('// @options: {"timeout_ms": 30000}\nconst out = await sh("echo hi");\nconst r = await run("exit 3");\nreturn [out.trim(), r.exit_code, (await settle([Promise.reject(new Error("no"))]))[0]];');
+	const ok = await script('// @options: {"timeout_ms": 30000}\nconst out = await run("echo hi", { check: true }).text();\nconst r = await run("exit 3");\nreturn [out.trim(), r.exit_code, (await settle([Promise.reject(new Error("no"))]))[0]];');
 	assert.match(ok.description, /Helpers defined in every script/);
 	assert.match(ok.result, /Script completed/);
 	assert.match(ok.result, /"hi",\s*3,\s*"Error: no"/);
 
-	const shadowed = await script("const sh = 1;\nreturn sh;");
+	const shadowed = await script("const run = 1;\nreturn run;");
 	assert.match(shadowed.result, /Script completed[\s\S]*\n1\b/);
 });
 
-test("json() finds the JSON when progress lines came first", async () => {
-	const ok = await script(`return (await json("echo unpacking; echo '{\\"a\\":1}'")).a === 1 ? "parsed" : "wrong";`);
-	assert.match(ok.result, /Script completed[\s\S]*parsed/);
+test("a tool that takes an action gets a method per action", async () => {
+	const ok = await script(`return typeof tools.job.status === "function" ? (await tools.job.status()).output : "missing";`);
+	assert.match(ok.result, /Script completed[\s\S]*No jobs/);
+});
+
+test("run().json() finds the JSON when progress lines came first, and check throws on a failure", async () => {
+	const ok = await script(`const failed = await run("exit 2", { check: true }).then(() => "passed", (e) => e.message.startsWith("exit 2"));
+return [(await run("echo unpacking; echo '{\\"a\\":1}'").json()).a === 1 ? "parsed" : "wrong", failed];`);
+	assert.match(ok.result, /Script completed[\s\S]*"parsed",\s*true/);
+});
+
+test("a command past wait_seconds returns a handle that waits, reads, and is reached by job", async () => {
+	const ok = await script(`const h = await run("echo first; sleep 1; echo second", { wait_seconds: 0.2 });
+const waited = await h.wait({ wait_seconds: 5 });
+const late = await run("sleep 5", { background: true });
+await late.kill();
+return [h.status, waited.output.includes("second"), late.status];`);
+	assert.match(ok.result, /\["running",\s*true,\s*"running"\]/);
+});
+
+test("interactive input reaches a running command, and a bare sudo fails at once", async () => {
+	const ok = await script(`const h = await run("read line; echo got:$line", { interactive: true, background: true });
+await h.write("hello\\n");
+const done = await h.wait({ wait_seconds: 5 });
+const sudo = await run("sudo -k true", { timeout: 20 });
+return [done.output.includes("got:hello"), sudo.exit_code !== 0, sudo.wall_time_seconds < 10];`);
+	assert.match(ok.result, /\[true,\s*true,\s*true\]/);
+});
+
+test("input written to a job arrives after initial input larger than a pipe holds", async () => {
+	const ok = await script(`const big = "a".repeat(1 << 20);
+const h = await run("head -c " + ((1 << 20) + 6) + " > out.txt", { interactive: true, stdin: big, background: true });
+await h.write("MARKER");
+await h.wait({ wait_seconds: 10 });
+const text = await fs.text("out.txt");
+return [text.length, text.endsWith("MARKER"), text.indexOf("M")];`);
+	assert.match(ok.result, /\[1048582,\s*true,\s*1048576\]/);
 });
 
 test("fs writes a file and reads back a window of it", async () => {
@@ -79,7 +113,7 @@ return [r.json().a, r.jsonErr().b, r.output.includes("a"), r.stderr.includes("b"
 });
 
 test("a // @background script returns at once and wakes the session with its output", async () => {
-	const run = await script('// @background\nawait sleep(1);\nreturn (await sh("echo late")).trim();', { tool: "codemode", args: { code: "await sleep(2);" } });
+	const run = await script('// @background\nawait sleep(1);\nreturn (await run("echo late").text()).trim();', { tool: "codemode", args: { code: "await sleep(2);" } });
 	assert.match(run.result, /in the background/);
 	assert.match(run.woken.join("\n"), /finished:[\s\S]*late/);
 });

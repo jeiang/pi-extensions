@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findPlan, planViolation } from "../extensions/plan/index.ts";
+import { addStep, parseSteps, progressLine, setDone } from "../extensions/plan/todo.ts";
 
 const dir = "/s/plans";
 const cwd = "/w";
@@ -38,6 +39,18 @@ test("plan mode blocks renames, worktree changes, and pull requests, and leaves 
 	assert.match(reason("github", { op: "pr_merge", method: "squash" }) ?? "", /pull request changes/);
 	assert.equal(reason("github", { op: "pr_view" }), undefined);
 	// A command may act, but only the model can tell; the planning prompt forbids it.
-	assert.equal(reason("shell", { command: "rm -rf /" }), undefined);
+	assert.equal(reason("run", { command: "rm -rf /" }), undefined);
 	assert.equal(reason("codemode", { code: "return 1" }), undefined);
+});
+
+test("the progress list checks, unchecks, and adds steps in place, leaving the rest of the plan alone", () => {
+	const plan = "# Plan\n\nText with [ ] brackets.\n\n## Steps\n- [ ] parse\n  - [x] nested\n- [ ] wire\n\n## Notes\nend\n";
+	assert.deepEqual(parseSteps(plan).map((s) => [s.id, s.done, s.text]), [[1, false, "parse"], [2, true, "nested"], [3, false, "wire"]]);
+	const checked = setDone(plan, 3, true);
+	assert.equal(checked, plan.replace("- [ ] wire", "- [x] wire"));
+	assert.equal(setDone(checked, 3, false), plan);
+	assert.equal(addStep(plan, "ship"), plan.replace("- [ ] wire\n", "- [ ] wire\n- [ ] ship\n"));
+	assert.equal(addStep("", "first"), "- [ ] first\n");
+	assert.throws(() => setDone(plan, 9, true), /No step 9/);
+	assert.equal(progressLine(parseSteps(checked)), "☐ 2/3 · parse");
 });

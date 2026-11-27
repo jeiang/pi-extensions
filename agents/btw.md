@@ -2,7 +2,7 @@
 name: btw
 description: Answers one side question about a session's state, in a throwaway session. Nothing it reads or says enters the caller's conversation.
 model: chain/light
-tools: read, grep, codemode, find, ls, read_text, bash, shell, sleep
+tools: read, grep, codemode, find, ls, read_text, run, job, sleep
 extensions: ~/.pi/agent/extensions/chains, ~/.pi/agent/extensions/workspace, ~/.pi/agent/extensions/guards, ~/.pi/agent/extensions/codemode, ~/.pi/agent/extensions/papercuts
 inheritProjectContext: true
 ---

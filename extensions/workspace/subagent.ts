@@ -6,9 +6,10 @@ import { join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
 import { type AgentToolResult, type ExtensionAPI, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { lastCheckpoint } from "../checkpoint/index.ts";
+import { readSteps, renderSteps, todoFile } from "../plan/todo.ts";
 import { addUsage } from "../footer/cost.ts";
 import { untilInterrupt } from "./interrupt.ts";
+import { claimed, trackJob } from "./jobs.ts";
 
 const DEFAULT_MAX_CONCURRENT = 3;
 const DEFAULT_TIMEOUT_S = 30 * 60;
@@ -124,10 +125,10 @@ const clip = (text: string, limit: number) => {
 const elapsed = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`);
 
 /** Where the session stands, for a child that cannot see its transcript. */
-export function sessionDigest(entries: Entry[], question: string): string {
+export function sessionDigest(entries: Entry[], question: string, sessionFile?: string): string {
 	const parts: string[] = [];
-	const checkpoint = lastCheckpoint({ getBranch: () => entries });
-	if (checkpoint) parts.push(`Checkpoint:\n${checkpoint.state}`);
+	const steps = readSteps(todoFile(entries, sessionFile));
+	if (steps.length > 0) parts.push(`Progress:\n${renderSteps(steps)}`);
 	const requests = entries.flatMap((entry) => (entry.type === "message" && entry.message?.role === "user" ? [textOf(entry.message.content)] : [])).filter(Boolean);
 	if (requests.length > 0) parts.push(`Last request from the user:\n${clip(requests.at(-1) ?? "", 600)}`);
 	const calls = entries.flatMap((entry) => (entry.type === "message" && entry.message?.role === "assistant" ? callsOf(entry.message.content) : []));
@@ -420,20 +421,25 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (input.resume && !(sessionDir && sessionExists(sessionDir, input.resume)))
 				throw new Error(`No child session ${input.resume} to resume; children live in ${sessionDir ?? "no directory, because this session is unsaved"}.`);
 			const session = input.resume ?? randomUUID();
-			const report = (result: ReturnType<typeof run>) =>
+			const report = (result: ReturnType<typeof run>) => {
+				const kill = () => [...children.values()].find((child) => child.session === session)?.kill();
+				trackJob(session, "subagent", `${agent.name}: ${task.split("\n")[0]?.slice(0, 80)}`, result, kill);
 				void result.then(
 					(done) => wake(done.failed ? `Subagent (session ${session}) ${done.text}` : `Subagent ${agent.name} finished (session ${session}):\n${done.text}`, done.failed, done.usage),
 					(error: Error) => wake(`Subagent ${agent.name} failed (session ${session}): ${error.message}`, true, undefined),
 				);
-			const wake = (content: string, error: boolean, usage: Usage | undefined) => {
-				if (closed) return;
-				pi.sendMessage({ customType: "subagent", content, display: true, details: { error, usage } }, { triggerTurn: true, deliverAs: "steer" });
 			};
+			// The wake waits a moment, so a job wait that returned the result claims it first.
+			const wake = (content: string, error: boolean, usage: Usage | undefined) =>
+				setTimeout(() => {
+					if (closed || claimed(session)) return;
+					pi.sendMessage({ customType: "subagent", content, display: true, details: { error, usage } }, { triggerTurn: true, deliverAs: "steer" });
+				}, 200);
 			if (input.background) {
 				// A background child outlives the tool call, so the call's signal does not cancel it.
 				report(run(agent, task, sessionDir, session, undefined, undefined, input.timeout));
 				return text(
-					`Launched ${agent.name} in the background as session ${session}; status with { action: "status", session: "${session}" } shows what it is doing, kill stops it, and you are woken with its result or failure.`,
+					`Launched ${agent.name} in the background as session ${session}; status with { action: "status", session: "${session}" } shows what it is doing, job waits on it as ${session}, kill stops it, and you are woken with its result or failure.`,
 					agent.name,
 					"background",
 					session,
@@ -477,7 +483,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (!scout) return ctx.ui.notify("No btw agent in the agents directory.", "error");
 			ctx.ui.setStatus("btw", "thinking");
 			try {
-				const outcome = await run(scout, sessionDigest(ctx.sessionManager.getBranch() as Entry[], question), undefined, randomUUID(), undefined, undefined, 120);
+				const outcome = await run(scout, sessionDigest(ctx.sessionManager.getBranch() as Entry[], question, ctx.sessionManager.getSessionFile()), undefined, randomUUID(), undefined, undefined, 120);
 				pi.appendEntry("btw", { question, answer: outcome.text });
 				ctx.ui.notify(outcome.text, outcome.failed ? "error" : "info");
 			} finally {

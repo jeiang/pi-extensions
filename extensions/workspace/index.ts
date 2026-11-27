@@ -18,7 +18,7 @@ import { structuredGrep } from "./grep.ts";
 import { hashlineTools } from "./hashline.ts";
 import { registerInterrupt } from "./interrupt.ts";
 import { readTextTool, structuredFind, structuredLs } from "./listing.ts";
-import { cwdParam, registerShell, ttyParam } from "./shell.ts";
+import { registerShell } from "./shell.ts";
 import { registerSsh } from "./ssh.ts";
 import { registerSubagent } from "./subagent.ts";
 import { substituteTool } from "./substitute.ts";
@@ -43,6 +43,13 @@ import {
 } from "./worktree.ts";
 
 const ENTRY = "workspace-worktree";
+
+/** macOS names screenshots with a narrow no-break space before AM or PM; a typed path has a plain one. */
+export function withNarrowSpaces(absolute: string): string | undefined {
+	if (existsSync(absolute) || !/ (AM|PM)\b/.test(absolute)) return undefined;
+	const narrow = absolute.replace(/ (AM|PM)\b/g, "\u202f$1");
+	return existsSync(narrow) ? narrow : undefined;
+}
 const NEEDS_WORKTREE =
 	"The main checkout stays untouched. Call the worktree tool first (action create with a short kebab-case name, or enter with an existing branch); paths and git commands then resolve in that worktree.";
 
@@ -72,27 +79,29 @@ export default function (pi: ExtensionAPI) {
 	const READ_ONLY = new Set(["read", "grep", "find", "ls", "read_text"]);
 	const remapRead = (name: string, path: unknown) => {
 		const mapped = remap(path);
-		if (!READ_ONLY.has(name) || mapped === path || !worktree || existsSync(String(mapped))) return mapped;
-		return path;
+		if (!READ_ONLY.has(name)) return mapped;
+		const found = mapped === path || !worktree || existsSync(String(mapped)) ? mapped : path;
+		return typeof found === "string" ? withNarrowSpaces(resolve(cwd(), found)) ?? found : found;
 	};
 	const needsWorktree = () => guarded && !worktree;
 	const inMainCheckout = (path: string) => Boolean(repo && checkoutRelative(resolve(sessionCwd, path.replace(/^@/, "")), repo.root) !== undefined);
 
 	const devshells = new Map<string, { stamp: string; pending: Promise<Devshell | undefined> }>();
 	const devshellErrors = new Map<string, string>();
-	const env = async (dir: string): Promise<NodeJS.ProcessEnv> => {
+	const env = async (dir: string, name?: string): Promise<NodeJS.ProcessEnv> => {
 		// A flake created or edited mid-session changes the stamp, so the next command gets its devshell.
 		const stamp = devshellStamp(dir);
-		let entry = devshells.get(dir);
+		const key = name ? `${dir}#${name}` : dir;
+		let entry = devshells.get(key);
 		if (entry?.stamp !== stamp) {
-			devshellErrors.delete(dir);
-			const pending = resolveDevshell(dir).catch((error: Error) => {
-				devshellErrors.set(dir, error.message.split("\n").slice(0, 5).join("\n"));
-				devshells.delete(dir);
+			devshellErrors.delete(key);
+			const pending = resolveDevshell(dir, name).catch((error: Error) => {
+				devshellErrors.set(key, error.message.split("\n").slice(0, 5).join("\n"));
+				devshells.delete(key);
 				return undefined;
 			});
 			entry = { stamp, pending };
-			devshells.set(dir, entry);
+			devshells.set(key, entry);
 		}
 		return applyEnv(process.env, await entry.pending);
 	};
@@ -143,26 +152,17 @@ export default function (pi: ExtensionAPI) {
 			if (!folder || (!input.apply && readableFolder(folder)) || input.paths?.some((path) => restrictedFolder(path, cwd()) === folder)) return undefined;
 			return `${folder} is restricted; name it in paths so the user is asked.`;
 		}),
+		{ exposure: "codemode" },
 	);
 	override(structuredGrep);
 	override(structuredFind, { exposure: "codemode" });
 	override(structuredLs, { exposure: "codemode" });
 	override(readTextTool, { exposure: "codemode" });
 
-	const shell = registerShell(pi, { cwd, env, devshellError: (dir) => devshellErrors.get(dir) });
-	const bashTemplate = createBashToolDefinition(sessionCwd);
-	pi.registerTool({
-		...bashTemplate,
-		exposure: "codemode",
-		parameters: Type.Object({
-			...bashTemplate.parameters.properties,
-			cwd: cwdParam,
-			tty: ttyParam,
-			tail: Type.Optional(Type.Number({ description: "Return only the last N lines; the full output stays in the log file named in `log`." })),
-		}),
-		execute: (_id, params, signal, onUpdate) => shell.bash(params, signal, onUpdate),
-	});
-	registerSsh(pi, shell);
+	// pi's own bash would run commands past the guards and outside the devshell; run replaces it.
+	pi.registerTool({ ...createBashToolDefinition(sessionCwd), exposure: "hidden" });
+	const ssh = registerSsh(pi, () => env(cwd()), (path) => cwd(path));
+	registerShell(pi, { cwd, env, devshellError: (dir, name) => devshellErrors.get(name ? `${dir}#${name}` : dir), sshCommand: ssh.command });
 	registerSubagent(pi, { cwd: () => cwd(), env });
 	registerInterrupt(pi);
 	pi.registerTool({
@@ -265,7 +265,7 @@ const worktreeParams = Type.Object({
 		repo: Type.Optional(
 			Type.String({
 				description:
-					"Another repository's main checkout (absolute path) to run create, enter, remove, list, prune, or ff_main in. The session stays where it is; run commands in the new worktree through the cwd parameter of shell or bash.",
+					"Another repository's main checkout (absolute path) to run create, enter, remove, list, prune, or ff_main in. The session stays where it is; run commands in the new worktree through run's cwd.",
 			}),
 		),
 	});
@@ -279,7 +279,7 @@ const worktreeParams = Type.Object({
 	};
 	/** Worktree actions in a repository other than the session's; the session's directory stays unchanged. */
 	const inOtherRepo = async (root: string, input: Static<typeof worktreeParams>) => {
-		const hint = "Run commands there with the cwd parameter of shell or bash and use absolute file paths; this session's directory is unchanged.";
+		const hint = "Run commands there with run's cwd and use absolute file paths; this session's directory is unchanged.";
 		switch (input.action) {
 			case "create":
 			case "enter": {
@@ -323,7 +323,6 @@ const worktreeParams = Type.Object({
 			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. exit: leave the current worktree, remove it, and return to the main checkout; a merged branch is deleted and an unmerged one kept. list. prune: delete clean worktrees whose work is merged, the current one and a detached one included, and their branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. ff_main: fast-forward the default branch to name, else this worktree's branch, else origin's default branch; anything but a fast-forward is refused, and nothing is pushed. Writes in the main checkout are blocked until create or enter.",
 		promptSnippet: "Create, enter, exit, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in; fast-forward main. Create one before writing",
 		parameters: worktreeParams,
-		exposure: "model-only",
 		async execute(_id, input: Static<typeof worktreeParams>, _signal, _onUpdate, ctx) {
 			if (!worktree && !repo?.hasCommits) repo = await detectRepo(sessionCwd);
 			if (input.repo) {

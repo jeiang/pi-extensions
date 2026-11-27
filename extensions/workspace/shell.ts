@@ -1,4 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, write, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -6,12 +7,12 @@ import {
 	type AgentToolUpdateCallback,
 	createLocalBashOperations,
 	type ExtensionAPI,
-	type ExtensionToolContext,
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
+import { promisify } from "node:util";
 import { type Static, Type } from "typebox";
+import { type TrackedJob, trackedJob, trackedJobs } from "./jobs.ts";
 
-const DEFAULT_TIMEOUT_S = 120;
 /** A wait with no bound of its own returns after this many seconds; the job keeps running. */
 const DEFAULT_WAIT_S = 120;
 
@@ -22,6 +23,8 @@ export function waitBound(input: { wait_on?: string; wait_seconds?: number }, fa
 const TAIL_LINES = 30;
 /** A shell command's stderr is captured separately, so a JSON payload on stdout stays parseable. */
 const STDERR_MAX_BYTES = 256 * 1024;
+/** A pipe write that waits off the event loop, so a full pipe never freezes the session. */
+const writeFd = promisify(write);
 const quotePath = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
 /** The command under a pty, so a program that insists on a terminal (sudo) can prompt. The inner shell writes its pid, which is its session's id too. */
@@ -33,9 +36,16 @@ export function ttyCommand(command: string, platform: NodeJS.Platform = process.
 export function ttyOutput(text: string): string {
 	return text.replace(/\^D\x08\x08/g, "").replace(/\r\n/g, "\n");
 }
-/** The command as the shell runs it: stderr to its own file, so stdout alone stays parseable, under a pty when asked. */
-export function jobCommand(command: string, errFile: string, tty: boolean, pidFile?: string): string {
-	const wrapped = `{ ${command}\n} 2> ${quotePath(errFile)}`;
+/** Without a terminal sudo would wait for a password nobody can type, until the command's timeout. */
+const SUDO_FAILS_FAST = 'sudo() { command sudo -n "$@"; }';
+
+/**
+ * The command as the shell runs it: stderr to its own file, so stdout alone stays parseable, under a pty when asked.
+ * `stdinFile` feeds its standard input; without a pty, a bare `sudo` fails at once instead of waiting for a password.
+ */
+export function jobCommand(command: string, errFile: string, tty: boolean, pidFile?: string, stdinFile?: string): string {
+	const body = tty ? command : `${SUDO_FAILS_FAST}\n${command}`;
+	const wrapped = `{ ${body}\n} 2> ${quotePath(errFile)}${stdinFile ? ` < ${quotePath(stdinFile)}` : ""}`;
 	return tty ? ttyCommand(wrapped, undefined, pidFile) : wrapped;
 }
 const MAX_WAKES = 5;
@@ -61,44 +71,75 @@ interface Job {
 	/** `overwrite`: the line replaces the one before it, as after a carriage return. */
 	listeners: Set<(line: string, overwrite: boolean) => void>;
 	done: Promise<void>;
+	/** The write end of an interactive job's stdin pipe. */
+	stdin?: number;
+	/** The last pending write to it; each write waits for the one before, so input arrives in order. */
+	written?: Promise<unknown>;
+	/** Set once a result reached the agent, so the exit wake-up is not sent too. */
+	claimed?: boolean;
 }
 
-export const cwdParam = Type.Optional(
+const cwdParam = Type.Optional(
 	Type.String({
 		description: "Directory to run in, such as a worktree of another repository; an absolute path, or relative to the session directory. Loads that directory's devshell.",
 	}),
 );
 
 /** The pty flag, on the shell tool and the codemode `bash` tool its scripts call. */
-export const ttyParam = Type.Optional(
+const ttyParam = Type.Optional(
 	Type.Boolean({
 		description:
 			"Run under a pty, so a program that checks for a terminal works (`sudo` can prompt, progress output renders). stdout and stdin are the terminal, with line endings normalized; stderr stays apart, and the log holds both.",
 	}),
 );
 
-const params = Type.Object({
+const sshParams = Type.Object({
+	options: Type.Optional(
+		Type.Record(Type.String(), Type.Union([Type.String(), Type.Number(), Type.Boolean()]), {
+			description: 'ssh -o options, e.g. { User: "deploy", ProxyJump: "edge", ConnectTimeout: 5 }. Defaults: BatchMode yes, ConnectTimeout 10.',
+		}),
+	),
+	identity: Type.Optional(Type.String({ description: "Private key file (-i), for a host that is not in ~/.ssh/config." })),
+	port: Type.Optional(Type.Number({ description: "Remote port (-p)." })),
+	agent_forward: Type.Optional(Type.Boolean({ description: "Forward the local ssh agent (-A)." })),
+});
+
+const runParams = Type.Object({
+	command: Type.String({ description: "Shell command (bash). Runs inside the directory's devshell, or with host under the remote bash whatever its login shell." }),
 	cwd: cwdParam,
-	command: Type.Optional(Type.String({ description: "Shell command (bash). Runs inside the repository's devshell." })),
-	timeout: Type.Optional(
-		Type.Number({ description: `Seconds before a foreground command moves to the background (default ${DEFAULT_TIMEOUT_S}). It is not killed.` }),
+	host: Type.Optional(
+		Type.String({ description: "Run on this host (Host alias, user@host) over one shared ssh connection per host for the session; cwd is then the remote directory." }),
 	),
-	background: Type.Optional(Type.Boolean({ description: "Start as a background job and return its id." })),
-	wait_on: Type.Optional(
-		Type.String({ description: "Regex: return as soon as an output line matches; later matching lines wake you while the job runs." }),
+	ssh: Type.Optional(sshParams),
+	devshell: Type.Optional(Type.String({ description: "A named devshell of the directory's flake (nix develop .#<name>) instead of the default one." })),
+	tty: ttyParam,
+	stdin: Type.Optional(Type.String({ description: "Text for the command's standard input." })),
+	interactive: Type.Optional(Type.Boolean({ description: "Keep standard input open, so job write can send input while the command runs." })),
+	check: Type.Optional(Type.Boolean({ description: "Fail when the command exits non-zero (a script's call throws)." })),
+	timeout: Type.Optional(Type.Number({ description: "Seconds before the command is killed (default: never)." })),
+	wait_seconds: Type.Optional(
+		Type.Number({ description: `Seconds to wait before returning a job handle while the command keeps running (default ${DEFAULT_WAIT_S}; with background, none).` }),
 	),
-	wait_seconds: Type.Optional(Type.Number({ description: "Return after this many seconds even if the job still runs." })),
+	wait_on: Type.Optional(Type.String({ description: "Regex: return a job handle as soon as an output line matches; later matching lines wake you while it runs." })),
+	background: Type.Optional(Type.Boolean({ description: "Return a job handle at once; you are woken when it exits." })),
 	tail: Type.Optional(
 		Type.Number({ description: "Return only the last N lines of output. The full output stays in the log file named in the result; read or grep it instead of piping into tail, head, or grep." }),
 	),
-	tty: ttyParam,
-	action: Type.Optional(
-		Type.Union([Type.Literal("status"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("kill")], {
-			description: "Act on jobs instead of running a command: status lists jobs; read returns new output; wait returns on wait_on, wait_seconds, or the job's exit, and otherwise after 120s with the job still running; kill stops it.",
-		}),
-	),
-	job: Type.Optional(Type.String({ description: "Job id for read, wait, kill." })),
 });
+type RunParams = Static<typeof runParams>;
+
+const jobParams = Type.Object({
+	action: Type.Union([Type.Literal("status"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("write")], {
+		description:
+			"status: list jobs (commands, background subagents, scripts, CI watches). read: new output since the last read. wait: until wait_on matches, wait_seconds pass, or the job ends, else 120s. kill: stop it. write: send input to an interactive command.",
+	}),
+	job: Type.Optional(Type.String({ description: "The job id a run handle, background subagent (its session), script, or watch named." })),
+	wait_on: Type.Optional(Type.String({ description: "wait: regex to return on when an output line matches." })),
+	wait_seconds: Type.Optional(Type.Number({ description: "wait: return after this many seconds even if the job still runs." })),
+	input: Type.Optional(Type.String({ description: "write: text for the command's standard input; end it with a newline to send a line." })),
+	tail: Type.Optional(Type.Number({ description: "Return only the last N lines of output." })),
+});
+type JobParams = Static<typeof jobParams>;
 
 /** The last `lines` lines of `output`, and whether that left anything out. */
 export function lastLines(output: string, lines: number) {
@@ -106,15 +147,16 @@ export function lastLines(output: string, lines: number) {
 	const shown = rows.slice(-Math.max(1, Math.floor(lines)));
 	return { content: shown.join("\n"), truncated: shown.length < rows.length };
 }
-type Params = Static<typeof params>;
 
-export const shellOutputSchema = Type.Object({
-	job: Type.Optional(Type.String()),
-	status: Type.Optional(Type.String({ description: "running, exited, killed, or failed" })),
+const shellOutputSchema = Type.Object({
+	job: Type.Optional(Type.String({ description: "The job id; job waits on, reads, writes to, or kills it." })),
+	status: Type.Optional(Type.String({ description: "running, exited, killed, failed, or for other jobs done" })),
 	exit_code: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
 	log: Type.Optional(Type.String({ description: "The full output; read or grep it." })),
-	output: Type.String({ description: "stdout shown, or for action status the job summaries." }),
+	output: Type.String({ description: "stdout shown (up to 1 MiB), or for action status the job summaries." }),
 	stderr: Type.Optional(Type.String({ description: "stderr alone, which the log also holds after the stdout." })),
+	truncated: Type.Optional(Type.Boolean({ description: "Whether output leaves out part of stdout; the log holds all of it." })),
+	wall_time_seconds: Type.Optional(Type.Number()),
 });
 type ShellResult = Static<typeof shellOutputSchema>;
 
@@ -148,69 +190,23 @@ function readLog(job: Job, from = 0): string {
 	return buffer.subarray(from).toString("utf8");
 }
 
-const SHELL_META = /[|;&<>`$(){}*?\n]/;
-const LEVEL_FLAGS: Record<string, "ignoreCase" | "literal" | "skip"> = {
-	"-i": "ignoreCase",
-	"--ignore-case": "ignoreCase",
-	"-F": "literal",
-	"--fixed-strings": "literal",
-	"-n": "skip",
-	"--line-number": "skip",
-	"-r": "skip",
-	"-R": "skip",
-	"-E": "skip",
-	"--no-heading": "skip",
-};
-
-function tokenize(command: string): string[] | undefined {
-	const tokens: string[] = [];
-	const re = /\s*(?:'([^']*)'|"([^"\\$`]*)"|([^\s'"]+))/gy;
-	let match: RegExpExecArray | null;
-	let consumed = 0;
-	while ((match = re.exec(command)) !== null) {
-		if (match[0].trim() === "") break;
-		tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
-		consumed = re.lastIndex;
-	}
-	return command.slice(consumed).trim() === "" ? tokens : undefined;
-}
-
-/** Arguments for the grep tool when `command` is one plain `rg` or `grep` call it can serve. */
-export function grepRoute(command: string): Record<string, unknown> | undefined {
-	const unquoted = command.replace(/'[^']*'|"[^"]*"/g, "");
-	if (SHELL_META.test(unquoted)) return undefined;
-	const tokens = tokenize(command.trim())?.flatMap((token) =>
-		/^-[a-zA-Z]{2,}$/.test(token) ? [...token.slice(1)].map((letter) => `-${letter}`) : [token],
-	);
-	if (!tokens || (tokens[0] !== "rg" && tokens[0] !== "grep")) return undefined;
-	const args: Record<string, unknown> = {};
-	const positional: string[] = [];
-	for (let i = 1; i < tokens.length; i++) {
-		const token = tokens[i] ?? "";
-		const flag = LEVEL_FLAGS[token];
-		if (flag === "skip") continue;
-		if (flag) args[flag] = true;
-		else if (token === "-g" || token === "--glob" || token === "--include") args.glob = tokens[++i];
-		else if (token.startsWith("--include=") || token.startsWith("--glob=")) args.glob = token.slice(token.indexOf("=") + 1);
-		else if (token === "-C" || token === "--context") args.context = Number(tokens[++i]);
-		else if (token.startsWith("-")) return undefined;
-		else positional.push(token);
-	}
-	const stdin = tokens[0] === "grep" && positional.length < 2 && !tokens.includes("-r") && !tokens.includes("-R");
-	if (positional.length < 1 || positional.length > 2 || stdin) {
-		return undefined;
-	}
-	args.pattern = positional[0];
-	if (positional[1]) args.path = positional[1];
-	return args;
-}
-
 export interface ShellOptions {
 	/** The session directory, or `dir` resolved against it. */
 	cwd: (dir?: string) => string;
-	env: (cwd: string) => Promise<NodeJS.ProcessEnv>;
+	/** The environment for commands in `cwd`, with its devshell, or the named one of its flake. */
+	env: (cwd: string, devshell?: string) => Promise<NodeJS.ProcessEnv>;
 	/** Why the devshell for `cwd` failed to load, if it did. */
-	devshellError: (cwd: string) => string | undefined;
+	devshellError: (cwd: string, devshell?: string) => string | undefined;
+	/** The local command that runs `command` on a host over the shared connection. */
+	sshCommand: (input: { host: string; command: string; cwd?: string; tty?: boolean; stdin?: boolean; ssh?: Static<typeof sshParams> }) => Promise<string>;
+}
+
+interface StartOptions {
+	label?: string;
+	tty?: boolean;
+	stdin?: string;
+	interactive?: boolean;
+	devshell?: string;
 }
 
 export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
@@ -261,12 +257,25 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 	};
 
 	/** `label` stands in for `command` in summaries, for a command that is not worth reading. */
-	const start = async (command: string, cwd: string, label = command, tty = false): Promise<Job> => {
+	const start = async (command: string, cwd: string, start: StartOptions = {}): Promise<Job> => {
+		const { label = command, tty = false } = start;
 		mkdirSync(logDir, { recursive: true });
 		const id = `job${next++}`;
 		const log = join(logDir, `${process.pid}-${id}.log`);
-		const env = await options.env(cwd);
-		const devshellError = options.devshellError(cwd);
+		const env = await options.env(cwd, start.devshell);
+		const devshellError = options.devshellError(cwd, start.devshell);
+		// Text for stdin goes through a file; an interactive job reads a pipe that job write feeds.
+		let stdinFile: string | undefined;
+		let stdinFd: number | undefined;
+		if (start.interactive) {
+			stdinFile = join(logDir, `${process.pid}-${id}.in`);
+			execFileSync("mkfifo", [stdinFile]);
+			// Read-write, so opening the pipe does not wait for the reader.
+			stdinFd = openSync(stdinFile, "r+");
+		} else if (start.stdin !== undefined) {
+			stdinFile = join(logDir, `${process.pid}-${id}.in`);
+			writeFileSync(stdinFile, start.stdin);
+		}
 		writeFileSync(log, devshellError ? `[shell] devshell failed, ran without it:\n${devshellError}\n` : "");
 		// stderr goes to its own file, inside the pty too, so a command's JSON on stdout stays parseable.
 		const errFile = join(logDir, `${process.pid}-${id}.err`);
@@ -283,9 +292,9 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			if (overwrite && line === "") return;
 			for (const listener of listeners) listener(line, overwrite);
 		};
-		const job: Job = { id, command: label, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, pidFile, done: Promise.resolve() };
+		const job: Job = { id, command: label, log, started: Date.now(), status: "running", controller, cursor: 0, listeners, pidFile, done: Promise.resolve(), stdin: stdinFd };
 		job.done = ops
-			.exec(jobCommand(command, errFile, tty, pidFile), cwd, {
+			.exec(jobCommand(command, errFile, tty, pidFile, stdinFile), cwd, {
 				signal: controller.signal,
 				env: { ...env, PYTHONUNBUFFERED: "1" },
 				onData: (data) => {
@@ -317,12 +326,18 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			job.stderr = existsSync(errFile) ? readFileSync(errFile, "utf8") : "";
 			if (job.stderr.trim()) appendFileSync(log, `\n[stderr]\n${job.stderr}`);
 			if (partial) emit(partial.replace(/\r$/, ""));
-			if (pidFile) try {
-				unlinkSync(pidFile);
-			} catch {
-				// The file is gone already.
-			}
+			if (job.stdin !== undefined) closeSync(job.stdin);
+			job.stdin = undefined;
+			for (const file of [pidFile, stdinFile])
+				if (file)
+					try {
+						unlinkSync(file);
+					} catch {
+						// The file is gone already.
+					}
 		});
+		// The reader runs now, so text more than a pipe holds drains instead of blocking.
+		if (start.interactive && start.stdin && stdinFd !== undefined) job.written = writeFd(stdinFd, start.stdin).catch(() => undefined);
 		jobs.set(id, job);
 		return job;
 	};
@@ -373,12 +388,15 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		void job.done.then(() => job.listeners.delete(onLine));
 	};
 
+	// The wake waits a moment, so a job wait that returned this exit claims it first and no duplicate arrives.
 	const reportExit = (job: Job) =>
-		void job.done.then(() => {
-			if (job.status === "killed") return;
-			const failed = job.status !== "exited" || job.exitCode !== 0;
-			wake(`Job finished: ${summary(job)}\nLast lines:\n${tail(readLog(job))}`, failed);
-		});
+		void job.done.then(() =>
+			setTimeout(() => {
+				if (job.status === "killed" || job.claimed) return;
+				const failed = job.status !== "exited" || job.exitCode !== 0;
+				wake(`Job finished: ${summary(job)}\nLast lines:\n${tail(readLog(job))}`, failed);
+			}, 200),
+		);
 
 	const progress = (job: Job, why: string, lines?: number) => {
 		const output = readLog(job, job.cursor);
@@ -386,6 +404,8 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		const shown = view(output, lines);
 		return { ...text(`${why}\n${summary(job)}\n${shown}`), structuredContent: shape(job, shown) };
 	};
+
+	const regex = (source: string | undefined) => (source ? new RegExp(source.replace(/^\(\?i\)/, ""), source.startsWith("(?i)") ? "i" : "") : undefined);
 
 	const findJob = (id: string | undefined): Job => {
 		const job = id ? jobs.get(id) : undefined;
@@ -434,124 +454,150 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		await Promise.all([...jobs.values()].filter((job) => job.status === "running").map(stop));
 	});
 
-	/** The codemode `bash` tool: pi's result shape, run as a job. */
-	const bash = async (
-		input: { command: string; timeout?: number; cwd?: string; tail?: number; label?: string; tty?: boolean },
-		signal: AbortSignal | undefined,
-		onUpdate: AgentToolUpdateCallback<undefined> | undefined,
-	) => {
-		const job = await start(input.command, dirOf(input.cwd), input.label, input.tty);
-		const unfollow = follow(job, onUpdate);
-		const why = await waitFor(job, undefined, input.timeout, signal);
-		unfollow();
-		if (why !== "exit") {
-			await stop(job);
-			jobs.delete(job.id);
-			const status = why === "abort" ? "Command aborted" : `Command timed out after ${input.timeout} seconds`;
-			throw new Error(`${truncateTail(readLog(job)).content}\n\n${status}`);
-		}
-		const result = finished(job, input.tail);
-		if (job.status !== "exited" || job.exitCode == null) throw new Error(result.content[0]?.text);
+	/** The exit result with stdout and stderr apart, for a script to parse. */
+	const result = (job: Job, input: { command: string; tail?: number; check?: boolean; timeout?: number }) => {
+		const base = finished(job, input.tail);
 		const stdout = job.stdout ?? readLog(job);
-		// `tail` is the agent's own cut; truncated says whether this output left out any of the log.
+		// `tail` is the agent's own cut; truncated says whether this output left out any of stdout.
 		const shown = input.tail === undefined ? truncateTail(stdout, { maxBytes: STRUCTURED_MAX_BYTES, maxLines: Number.MAX_SAFE_INTEGER }) : lastLines(stdout, input.tail);
-		const structuredContent = {
-			output: shown.content,
+		const killed = job.status === "killed" && input.timeout !== undefined ? `Killed after the ${input.timeout}s timeout.` : "";
+		const structuredContent: ShellResult = {
+			...shape(job, shown.content),
 			stderr: (job.stderr ?? "").slice(-STDERR_MAX_BYTES),
 			truncated: shown.truncated,
-			...(shown.truncated ? { full_output_path: job.log } : {}),
-			log: job.log,
-			exit_code: job.exitCode,
 			wall_time_seconds: Math.round(((job.ended ?? Date.now()) - job.started) / 100) / 10,
 		};
-		return { ...result, structuredContent };
+		if (input.check && (job.status !== "exited" || job.exitCode !== 0)) {
+			const why = job.status === "exited" ? `exit ${job.exitCode}` : killed || job.status;
+			throw new Error(`${why}: ${input.command}\n${`${shown.content}\n${job.stderr ?? ""}`.trim().slice(-2000)}\nlog: ${job.log}`);
+		}
+		const content = killed ? [{ type: "text" as const, text: `${base.content[0]?.text}\n${killed}` }] : base.content;
+		return { ...base, content, structuredContent };
 	};
 
-	/** Starts a job and returns within `seconds`: its result when it exits, otherwise a background job that wakes the session. */
-	const waitStart = async (
-		command: string,
-		input: { seconds: number; label?: string; tail?: number; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<undefined> },
-	) => {
-		const job = await start(command, dirOf(), input.label);
-		const unfollow = follow(job, input.onUpdate);
-		const why = await waitFor(job, undefined, input.seconds, input.signal);
-		unfollow();
-		if (why === "exit") return finished(job, input.tail);
-		if (why === "abort") {
-			await stop(job);
-			return progress(job, "Cancelled.", input.tail);
-		}
-		reportExit(job);
-		return progress(job, `Still running after ${input.seconds}s; moved to the background.`, input.tail);
+	/** A job still running: what it printed so far and how to reach it. */
+	const handle = (job: Job, why: string, lines?: number) => {
+		const shown = progress(job, `${why} job wait, read, write, or kill reach it as ${job.id}.`, lines);
+		return shown;
 	};
 
 	pi.registerTool({
-		name: "shell",
-		label: "Shell",
+		name: "run",
+		label: "Run",
 		description:
-			"Run processes: builds, tests, git, gh, nix, ssh, servers. Commands run in bash inside the repository's devshell. stdout and stderr are captured separately, so a JSON payload on stdout stays parseable; progress output goes to stderr. A foreground command still running after `timeout` moves to the background and wakes you when it exits. Background jobs return early on `wait_on` or `wait_seconds`. Every result names the log file holding both streams; pass `tail` for the end, then read (offset/limit) the log. Scripts get { job, status, exit_code, log, output, stderr }; for one foreground command, run() is simpler.",
-		promptSnippet: "Run processes (builds, tests, git, nix, ssh); background jobs with early return",
+			"Run a command: builds, tests, git, gh, nix, servers, or with host a command on another machine. Locally it runs in bash inside the directory's devshell. stdout and stderr are captured apart, so JSON on stdout stays parseable. timeout kills the command; a command still running after wait_seconds (default 120), a wait_on match, or at once with background returns a job handle and wakes you when it exits. check fails on a non-zero exit. Every result names the log holding both streams; pass tail for the end, then read the log. Scripts get { output, stderr, exit_code, status, log, truncated, wall_time_seconds, job }.",
+		promptSnippet: "Run a command locally or on a host; background jobs with early return",
 		exposure: "codemode",
-		parameters: params,
+		parameters: runParams,
 		outputSchema: shellOutputSchema,
-		async execute(_id, input: Params, signal, onUpdate, ctx: ExtensionToolContext) {
-			if (input.action === "status") return text([...jobs.values()].map(summary).join("\n") || "No jobs.");
-			if (input.action === "kill") {
-				const job = findJob(input.job);
-				await stop(job);
-				return { ...text(summary(job)), structuredContent: shape(job, "") };
+		async execute(_id, input: RunParams, signal, onUpdate) {
+			if (input.host !== undefined && !input.host.trim()) throw new Error("host is empty; leave it out to run locally.");
+			if (input.ssh && !input.host) throw new Error("ssh options need a host.");
+			if (input.host && input.devshell) throw new Error("devshell applies to local commands; a host runs its own shell.");
+			const command = input.host
+				? await options.sshCommand({ host: input.host, command: input.command, cwd: input.cwd, tty: input.tty, stdin: input.stdin !== undefined || input.interactive, ssh: input.ssh })
+				: input.command;
+			const label = input.host ? `${input.host}${input.cwd ? ` (in ${input.cwd})` : ""}: ${input.command}` : input.command;
+			const job = await start(command, input.host ? dirOf() : dirOf(input.cwd), {
+				label,
+				tty: input.tty,
+				stdin: input.stdin,
+				interactive: input.interactive,
+				devshell: input.devshell,
+			});
+			if (input.timeout !== undefined) {
+				const timer = setTimeout(() => void stop(job), input.timeout * 1000);
+				void job.done.then(() => clearTimeout(timer));
 			}
-			const pattern = input.wait_on ? new RegExp(input.wait_on.replace(/^\(\?i\)/, ""), input.wait_on.startsWith("(?i)") ? "i" : "") : undefined;
-			if (input.action === "read") return progress(findJob(input.job), "New output:", input.tail);
-			if (input.action === "wait") {
-				const job = findJob(input.job);
-				// An unbounded wait is a turn that never returns; without a selector, bound it and let the job run on.
-				const seconds = waitBound(input);
-				const why = await waitFor(job, pattern, seconds, signal);
-				const note = why === "time" ? `Still running after ${seconds}s; wait again or keep working.` : `Wait ended: ${why}.`;
-				return progress(job, note, input.tail);
-			}
-			if (!input.command) throw new Error("command is required");
-			const cwd = dirOf(input.cwd);
-			const route = grepRoute(input.command);
-			if (route && !input.background) {
-				const outcome = await ctx.executeTool("grep", { ...route, path: route.path ?? cwd }, { signal });
-				if (!outcome.isError) {
-					const found = outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
-					mkdirSync(logDir, { recursive: true });
-					const log = join(logDir, `${process.pid}-grep${next++}.log`);
-					writeFileSync(log, found);
-					const shown = view(found, input.tail);
-					return { ...text(`${shown}\nlog: ${log}`), structuredContent: { status: "exited", exit_code: 0, log, output: shown } };
-				}
-			}
-			const job = await start(input.command, cwd, input.command, input.tty);
+			const pattern = regex(input.wait_on);
 			if (input.background && !pattern && input.wait_seconds === undefined) {
 				reportExit(job);
-				return { ...text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`), structuredContent: shape(job, "") };
+				return handle(job, "Started in the background; you are woken when it exits.", input.tail);
 			}
 			const unfollow = follow(job, onUpdate);
-			const seconds = input.background ? input.wait_seconds : (input.wait_seconds ?? input.timeout ?? DEFAULT_TIMEOUT_S);
+			const seconds = input.wait_seconds ?? (input.background ? undefined : DEFAULT_WAIT_S);
 			const why = await waitFor(job, pattern, seconds, signal);
 			unfollow();
 			if (why === "abort") {
 				await stop(job);
 				return progress(job, "Cancelled.", input.tail);
 			}
-			if (why === "exit") return finished(job, input.tail);
+			if (why === "exit") return result(job, input);
 			if (pattern) watchLater(job, pattern);
 			reportExit(job);
-			const moved = why === "match" ? "Matched; still running." : "Still running; moved to the background.";
-			return progress(job, moved, input.tail);
+			return handle(job, why === "match" ? "Matched; still running." : `Still running after ${seconds}s; moved to the background, and you are woken when it exits.`, input.tail);
 		},
 	});
 
-	/** Starts `command` as a background job that wakes the session when it exits. */
-	const background = async (command: string, label: string) => {
-		const job = await start(command, dirOf(), label);
-		reportExit(job);
-		return { ...text(`Started ${job.id}; you are woken when it exits.\nlog: ${job.log}`), structuredContent: shape(job, "") };
+	const external = (id: string | undefined) => (id ? trackedJob(id) : undefined);
+	const externalSummary = (job: TrackedJob) => `${job.id} [${job.kind} ${job.status}, ${duration((job.ended ?? Date.now()) - job.started)}] ${job.label}`;
+	const externalResult = (job: TrackedJob, note: string) => {
+		if (job.status !== "running") job.claimed = true;
+		const body = job.status === "running" ? "" : `\n${job.result ?? ""}`;
+		return { ...text(`${note}\n${externalSummary(job)}${body}`), structuredContent: { job: job.id, status: job.status, output: job.result ?? "" } };
 	};
 
-	return { bash, background, waitStart, env: options.env, dirOf };
+	pi.registerTool({
+		name: "job",
+		label: "Job",
+		description:
+			"Reach work that runs past its call: commands run returned as a handle, background subagents (by session), background scripts, and CI watches. status lists them; read returns new output; wait returns on wait_on, after wait_seconds, or at the end, else after 120s with the job still running; kill stops it; write sends input to an interactive command. A result returned here is not sent again as a wake-up.",
+		promptSnippet: "Wait on, read, write to, or kill background jobs",
+		parameters: jobParams,
+		outputSchema: shellOutputSchema,
+		async execute(_id, input: JobParams, signal) {
+			if (input.action === "status") {
+				const rows = [...[...jobs.values()].map(summary), ...trackedJobs().map(externalSummary)];
+				return text(rows.join("\n") || "No jobs.");
+			}
+			const other = external(input.job);
+			if (other) {
+				if (input.action === "kill") {
+					if (!other.kill) throw new Error(`${other.id} cannot be killed from here.`);
+					other.kill();
+					return externalResult(other, "Kill sent.");
+				}
+				if (input.action === "write") throw new Error(`${other.id} is a ${other.kind}, not an interactive command.`);
+				if (input.action === "wait" && other.status === "running") {
+					const seconds = waitBound(input) ?? DEFAULT_WAIT_S;
+					const timer = Promise.withResolvers<void>();
+					const handle = setTimeout(timer.resolve, seconds * 1000);
+					const aborted = () => timer.resolve();
+					signal?.addEventListener("abort", aborted, { once: true });
+					await Promise.race([other.done, timer.promise]);
+					clearTimeout(handle);
+					signal?.removeEventListener("abort", aborted);
+					return externalResult(other, other.status === "running" ? `Still running after ${seconds}s; wait again or keep working.` : "Finished.");
+				}
+				return externalResult(other, other.status === "running" ? "Still running." : "Finished.");
+			}
+			const job = findJob(input.job);
+			if (input.action === "kill") {
+				job.claimed = true;
+				await stop(job);
+				return { ...text(summary(job)), structuredContent: shape(job, "") };
+			}
+			if (input.action === "write") {
+				if (job.stdin === undefined) throw new Error(`${job.id} has no open stdin; start it with run interactive: true.`);
+				const fd = job.stdin;
+				const text = input.input ?? "";
+				const sent = (job.written ?? Promise.resolve()).then(() => writeFd(fd, text));
+				job.written = sent.catch(() => undefined);
+				await sent;
+				return progress(job, "Sent.", input.tail);
+			}
+			if (input.action === "read") {
+				if (job.status !== "running") job.claimed = true;
+				return progress(job, "New output:", input.tail);
+			}
+			// An unbounded wait is a turn that never returns; without a selector, bound it and let the job run on.
+			const seconds = waitBound(input);
+			const why = await waitFor(job, regex(input.wait_on), seconds, signal);
+			if (why === "exit") job.claimed = true;
+			const note = why === "time" ? `Still running after ${seconds}s; wait again or keep working.` : `Wait ended: ${why}.`;
+			return progress(job, note, input.tail);
+		},
+	});
+
+	return { env: options.env, dirOf };
 }

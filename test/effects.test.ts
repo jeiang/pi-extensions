@@ -33,9 +33,15 @@ test("file tools write the paths they name", () => {
 test("calls outside the filesystem are either known to change state or opaque", () => {
 	assert.equal(kind("github", { op: "pr_merge", method: "squash" }), "mutate");
 	assert.equal(kind("github", { op: "pr_view" }), "read");
+	for (const op of ["pr_comment", "pr_close", "pr_edit", "workflow_run"]) assert.equal(kind("github", { op }), "mutate", op);
+	for (const op of ["pr_watch", "run_log", "repo_file", "api"]) assert.equal(kind("github", { op }), "read", op);
 	assert.equal(kind("worktree", { action: "create", name: "x" }), "mutate");
 	assert.equal(kind("worktree", { action: "list" }), "read");
-	for (const tool of ["shell", "codemode", "ssh", "subagent"]) assert.equal(kind(tool, { command: "rm -rf /" }), "opaque", tool);
+	for (const tool of ["run", "codemode", "subagent"]) assert.equal(kind(tool, { command: "rm -rf /" }), "opaque", tool);
+	assert.equal(kind("job", { action: "wait", job: "job1" }), "read");
+	assert.deepEqual(effectsOf("nix", { action: "flake_update" }, "/repo"), { kind: "write", paths: ["/repo/flake.lock"] });
+	assert.equal(kind("job", { action: "kill", job: "job1" }), "opaque");
+	assert.equal(kind("transfer", { host: "h", direction: "upload", local: "a", remote: "b" }), "opaque");
 });
 
 test("an unrecognized tool that names a path counts as a write", () => {

@@ -13,8 +13,11 @@ export type Effect =
 	| { kind: "write"; paths: string[] }
 	/** A call that changes something outside the filesystem: a pull request, a worktree, a deploy. */
 	| { kind: "mutate" }
-	/** A call that may act and cannot be classified: shell, codemode, ssh, a subagent. */
+	/** A call that may act and cannot be classified: run, codemode, a subagent. */
 	| { kind: "opaque" };
+
+/** The github ops that change something on GitHub. */
+const GITHUB_WRITES = new Set(["pr_create", "pr_merge", "pr_comment", "pr_close", "pr_edit", "workflow_run"]);
 
 const READ: Effect = { kind: "read" };
 const MUTATE: Effect = { kind: "mutate" };
@@ -48,6 +51,11 @@ const named = (input: Record<string, unknown>): string[] =>
 	Array.isArray(input.paths) ? input.paths.map(String) : typeof input.path === "string" ? [input.path] : [];
 
 export function effectsOf(tool: string, input: Record<string, unknown>, cwd: string): Effect {
+	// flake_update rewrites the flake's lock file; the other nix actions build in the store, not in the tree.
+	if (tool === "nix" && input.action === "flake_update") {
+		const flake = typeof input.flake === "string" && !input.flake.includes(":") ? resolve(cwd, input.flake) : cwd;
+		return { kind: "write", paths: [resolve(flake, "flake.lock")] };
+	}
 	if (READ_ONLY.has(tool) || READS.test(tool)) return tool === "lsp_apply" ? OPAQUE : READ;
 	switch (tool) {
 		case "edit":
@@ -64,12 +72,18 @@ export function effectsOf(tool: string, input: Record<string, unknown>, cwd: str
 			return { kind: "write", paths: (paths.length > 0 ? paths : ["."]).map((path) => resolve(cwd, path.replace(/^@/, ""))) };
 		}
 		case "github":
-			return input.op === "pr_create" || input.op === "pr_merge" ? MUTATE : READ;
+			return typeof input.op === "string" && GITHUB_WRITES.has(input.op) ? MUTATE : READ;
 		case "worktree":
 			return input.action === "list" ? READ : MUTATE;
-		case "shell":
+		case "job":
+			// Killing or feeding a job acts; looking at one does not.
+			return input.action === "kill" || input.action === "write" ? OPAQUE : READ;
+		case "transfer": {
+			if (input.direction !== "download" || typeof input.local !== "string") return OPAQUE;
+			return { kind: "write", paths: [resolve(cwd, input.local.replace(/^@/, ""))] };
+		}
+		case "run":
 		case "codemode":
-		case "ssh":
 		case "subagent":
 			return OPAQUE;
 	}

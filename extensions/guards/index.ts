@@ -9,9 +9,7 @@ interface Rule {
 	reason: string;
 }
 
-const COMMAND_TOOLS: Record<string, true> = { bash: true, shell: true, ssh: true };
-/** Their commands run elsewhere, so a path in them is not a local folder. */
-const REMOTE_TOOLS: Record<string, true> = { ssh: true };
+const COMMAND_TOOLS: Record<string, true> = { run: true };
 const PATH_TOOLS: Record<string, true> = { read: true, read_text: true, write: true, edit: true, replace: true, substitute: true, grep: true, find: true, ls: true };
 const READ_TOOLS: Record<string, true> = { read: true, read_text: true, grep: true, find: true, ls: true };
 
@@ -240,7 +238,8 @@ export default function (pi: ExtensionAPI) {
 				const verdict = await ask(ctx, "Allow blocked command?", `${violation}\n\n${command}`);
 				if (!verdict.allowed) return block(verdict.why, violation);
 			}
-			if (REMOTE_TOOLS[event.toolName]) return;
+			// A command on another host runs elsewhere, so a path in it is not a local folder.
+			if (typeof input.host === "string" && input.host.trim() !== "") return;
 			const dir = typeof input.cwd === "string" ? resolve(sessionDir(ctx), input.cwd) : sessionDir(ctx);
 			const switching = switchViolation(command, dir);
 			if (switching) {
@@ -250,6 +249,15 @@ export default function (pi: ExtensionAPI) {
 			const folder = commandMentionsRestricted(command) ?? (typeof input.cwd === "string" ? restrictedFolder(input.cwd, sessionDir(ctx)) : undefined);
 			if (folder && (!readableFolder(folder) || writesInto(command, folder))) {
 				const verdict = await ask(ctx, `Allow ${readableFolder(folder) ? "a write to" : "access to"} ${folder}?`, command);
+				if (!verdict.allowed) return block(verdict.why, `${folder} is restricted.`);
+			}
+			return;
+		}
+		if (enabled && event.toolName === "transfer" && typeof input.local === "string") {
+			// An upload reads the local path, a download writes it.
+			const folder = restrictedFolder(input.local, sessionDir(ctx));
+			if (folder && !(input.direction === "upload" && readableFolder(folder))) {
+				const verdict = await ask(ctx, `Allow transfer ${input.direction === "upload" ? "from" : "into"} ${folder}?`, `${input.local} ${input.direction === "upload" ? "->" : "<-"} ${String(input.host)}:${String(input.remote)}`);
 				if (!verdict.allowed) return block(verdict.why, `${folder} is restricted.`);
 			}
 			return;

@@ -30,6 +30,9 @@ const params = Type.Object({
 			Type.Literal("versions"),
 			Type.Literal("cache"),
 			Type.Literal("inputs"),
+		Type.Literal("closure"),
+		Type.Literal("derivation"),
+		Type.Literal("flake_update"),
 		],
 	),
 	query: Type.Optional(Type.String({ description: "search: words to find. versions: package name." })),
@@ -50,7 +53,10 @@ const params = Type.Object({
 	version: Type.Optional(Type.String({ description: "versions: only this version." })),
 	stores: Type.Optional(Type.Array(Type.String(), { description: "cache: substituter URLs; default the configured ones." })),
 	store: Type.Optional(Type.String({ description: "dry_run, build: build against this store (`ssh-ng://host`) with local evaluation. log: read the log from it." })),
-	input: Type.Optional(Type.String({ description: "inputs: input to list or read; omit for all." })),
+	input: Type.Optional(Type.String({ description: "inputs: input to list or read; omit for all. flake_update: the input to update; omit for all." })),
+	filter: Type.Optional(Type.String({ description: "closure: keep only store paths whose name matches this regex." })),
+	against: Type.Optional(Type.String({ description: "closure: a second output; returns what changed from it to outputs[0] (nix store diff-closures)." })),
+	why: Type.Optional(Type.String({ description: "closure: a store path or name in the closure; returns why outputs[0] depends on it (nix why-depends)." })),
 	limit: Type.Optional(Type.Number({ description: "search, versions: most results (default 10)." })),
 });
 type Params = Static<typeof params>;
@@ -99,6 +105,14 @@ const outputSchema = Type.Object({
 	paths: Type.Optional(Type.Array(Type.Object({ store: Type.String(), path: Type.String(), status: Type.String({ description: "cached, missing, or unknown" }), note: Type.Optional(Type.String()) }))),
 	inputs: Type.Optional(Type.Array(Type.Object({ name: Type.String(), path: Type.String() }))),
 	entries: Type.Optional(Type.Array(Type.String())),
+	closure: Type.Optional(
+		Type.Object({
+			root: Type.String(),
+			total_mib: Type.Number({ description: "Closure size." }),
+			count: Type.Number({ description: "Store paths in the closure." }),
+			paths: Type.Array(Type.Object({ path: Type.String(), nar_mib: Type.Number() }), { description: "Matching paths, largest first." }),
+		}),
+	),
 	text: Type.Optional(Type.String()),
 	note: Type.Optional(Type.String()),
 });
@@ -549,6 +563,65 @@ async function inputs(input: Params, flakeDir: string, signal: AbortSignal | und
 	return { action: "inputs", text: (await readFile(target, "utf8")).split("\n").slice(0, 2000).join("\n") };
 }
 
+/** One output's store path: a store path as is, else the installable's out path, built if need be. */
+async function storePathOf(output: string, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<string> {
+	const installable = await installableOf(output, flake, cwd, signal);
+	if (installable.startsWith("/nix/store/")) return installable;
+	const built = JSON.parse(await nixOk(buildArgs([installable]), cwd, signal)) as { outputs?: Record<string, string> }[];
+	const path = Object.values(built[0]?.outputs ?? {})[0];
+	if (!path) throw new Error(`nix build ${installable} returned no out path.`);
+	return path;
+}
+
+async function closure(input: Params, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<Output> {
+	const output = input.outputs?.[0];
+	if (!output) throw new Error("closure needs outputs (one).");
+	const root = await storePathOf(output, flake, cwd, signal);
+	if (input.against) {
+		const before = await storePathOf(input.against, flake, cwd, signal);
+		const text = (await nixOk(["store", "diff-closures", before, root], cwd, signal)).replace(/\u001b\[[0-9;]*m/g, "");
+		return { action: "closure", text: text.trim() || "No differences." };
+	}
+	if (input.why) {
+		const run = await nix(["why-depends", "--all", root, input.why], cwd, signal);
+		const target = run.code === 0 ? input.why : undefined;
+		if (target) return { action: "closure", text: run.stdout.replace(/\u001b\[[0-9;]*m/g, "").trim() };
+		// A name, not a path: find it in the closure first.
+		const list = JSON.parse(await nixOk(["path-info", "--recursive", "--json", root], cwd, signal)) as Record<string, unknown> | { path: string }[];
+		const paths = Array.isArray(list) ? list.map((entry) => entry.path) : Object.keys(list);
+		const found = paths.find((path) => storeName(path) === input.why) ?? paths.find((path) => storeName(path).includes(input.why ?? ""));
+		if (!found) throw new Error(`${input.why} is not in the closure of ${root}.`);
+		return { action: "closure", text: (await nixOk(["why-depends", "--all", root, found], cwd, signal)).replace(/\u001b\[[0-9;]*m/g, "").trim() };
+	}
+	const raw = JSON.parse(await nixOk(["path-info", "--recursive", "--json", "--closure-size", root], cwd, signal)) as
+		| Record<string, { narSize?: number; closureSize?: number } | null>
+		| { path: string; narSize?: number; closureSize?: number }[];
+	const entries = Array.isArray(raw) ? raw.map((entry) => [entry.path, entry] as const) : Object.entries(raw).map(([path, info]) => [path, info ?? {}] as const);
+	const mib = (bytes = 0) => Math.round((bytes / 1048576) * 10) / 10;
+	const pattern = input.filter ? new RegExp(input.filter) : undefined;
+	const paths = entries
+		.filter(([path]) => !pattern || pattern.test(storeName(path)))
+		.map(([path, info]) => ({ path, nar_mib: mib(info.narSize) }))
+		.sort((a, b) => b.nar_mib - a.nar_mib)
+		.slice(0, 500);
+	const self = entries.find(([path]) => path === root)?.[1];
+	return { action: "closure", closure: { root, total_mib: mib(self?.closureSize), count: entries.length, paths } };
+}
+
+async function derivation(input: Params, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<Output> {
+	if (!input.outputs?.length) throw new Error("derivation needs outputs.");
+	const installables = await Promise.all(input.outputs.map((output) => installableOf(output, flake, cwd, signal)));
+	return { action: "derivation", value: JSON.parse(await nixOk(["derivation", "show", ...installables], cwd, signal)) };
+}
+
+async function flakeUpdate(input: Params, flakeDir: string, signal: AbortSignal | undefined): Promise<Output> {
+	const run = await nix(["flake", "update", ...(input.input ? [input.input] : [])], flakeDir, signal);
+	if (run.code !== 0) throw failure(run, "nix flake update");
+	// nix reports each changed input on stderr, from "• Updated input" on.
+	const text = run.stderr.replace(/\u001b\[[0-9;]*m/g, "").trim();
+	return { action: "flake_update", text: text || "No inputs changed." };
+}
+
 function render(output: Output): string {
 	const text = JSON.stringify(output, null, 1);
 	return text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}\n… [cut at ${MAX_TEXT} characters; a codemode script gets the whole result]` : text;
@@ -564,10 +637,12 @@ export default function (pi: ExtensionAPI) {
 			"eval: nix eval --json. drv_diff: drvPaths vs base; same: true means nothing built changed. dry_run: what a build would fetch or build, heavy builds marked.",
 			"build: nix build --no-link, returning the out paths. log: a derivation's build log, from a store path, installable, or host name.",
 			"versions: NixHub history. cache: cached/missing/unknown per substituter. inputs: flake inputs; list or read inside one.",
+			"closure: an output's runtime closure with sizes, filter by name; against: diff-closures from another output; why: why it depends on a path.",
+			"derivation: nix derivation show. flake_update: update one input or all, writing flake.lock.",
 		].join("\n"),
-		promptSnippet: "Nix search, option lookup, eval, drvPath diff, dry-run, cache check, build, log",
+		promptSnippet: "Nix search, option lookup, eval, drvPath diff, dry-run, cache check, build, log, closure, flake update",
 		promptGuidelines: [
-			"Use the nix tool for nix eval, option lookups, drvPath diffs, dry runs, cache checks, builds, and build logs; keep nix develop and nix flake update in the shell.",
+			"Use the nix tool for nix eval, option lookups, drvPath diffs, dry runs, cache checks, builds, build logs, closures, derivations, and flake updates; keep nix develop and nix run in run().",
 		],
 		parameters: params,
 		outputSchema,
@@ -597,6 +672,12 @@ export default function (pi: ExtensionAPI) {
 						return cache(input, flake, flakeDir, signal);
 					case "inputs":
 						return inputs(input, flakeDir, signal);
+					case "closure":
+						return closure(input, flake, flakeDir, signal);
+					case "derivation":
+						return derivation(input, flake, flakeDir, signal);
+					case "flake_update":
+						return flakeUpdate(input, flakeDir, signal);
 				}
 				throw new Error(`Unknown action ${String(input.action)}.`);
 			})();

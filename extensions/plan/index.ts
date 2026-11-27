@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { Type } from "typebox";
 import { askAdvisor, type Review } from "../advisor/review.ts";
 import { effectsOf } from "../workspace/effects.ts";
+import { LIST, registerTodo } from "./todo.ts";
 
 const ENTRY = "plan";
 const CONTEXT = "plan-mode-context";
@@ -26,6 +27,8 @@ interface Handoff {
 	provider: string;
 	id: string;
 	thinkingLevel: ThinkingLevel;
+	/** The approved plan, whose checklist becomes the new session's progress list. */
+	file?: string;
 }
 
 const handoffSlot = globalThis as { [HANDOFF]?: Handoff };
@@ -63,12 +66,12 @@ You are planning. The user reviews your plan before anything changes.
 
 - Read-only: never create, edit, delete, or rename files outside ${dir}, and run no command that changes state (commits, installs, worktree creation, migrations, deploys, remote changes). Edit tools are blocked outside that directory.
 - Find facts in the code and tools instead of asking. Ask the user, with the questionnaire tool, only about preferences or trade-offs that change the plan.
-- Write the plan to ${dir}/<slug>.md, where <slug> is short kebab-case. It must stand alone: someone without this conversation executes it. Include the goal and context, the ordered concrete changes with file paths and symbols, how to verify each, and assumptions with what to do if one is wrong. Leave no design choice open, and do not refer to this conversation.
+- Write the plan to ${dir}/<slug>.md, where <slug> is short kebab-case. It must stand alone: someone without this conversation executes it. Include the goal and context, the ordered concrete changes with file paths and symbols, how to verify each, and assumptions with what to do if one is wrong. End with a \`## Steps\` checklist, one \`- [ ] step\` line per change: it becomes the progress list the user watches. Leave no design choice open, and do not refer to this conversation.
 - When the plan is complete, call ${PROPOSE} with the slug. Never ask for approval in prose. After feedback, update the same file and call ${PROPOSE} again.`;
 }
 
 function executionPrompt(plan: string, file: string): string {
-	return `Execute this approved plan step by step with full tool access. Verify each step before the next. The plan is also saved at ${file}.
+	return `Execute this approved plan step by step with full tool access. Verify each step before the next, and check it off with the todo tool (toggle by number) so the user sees the progress. The plan is also saved at ${file}.
 
 ${plan}`;
 }
@@ -90,6 +93,7 @@ export function findPlan(dir: string, slug: string): string | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
+	registerTodo(pi);
 	let state: PlanState = { enabled: false };
 	let reviewPending = false;
 	let reviewing = false;
@@ -162,6 +166,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (choice === "Approve and execute here") {
 				exit(ctx);
+				pi.appendEntry(LIST, { file });
 				pi.sendUserMessage(executionPrompt(plan, file));
 				return;
 			}
@@ -170,7 +175,7 @@ export default function (pi: ExtensionAPI) {
 				if (!target) continue;
 				const kickoff = executionPrompt(plan, file);
 				exit(ctx);
-				handoffSlot[HANDOFF] = target;
+				handoffSlot[HANDOFF] = { ...target, file };
 				const result = await ctx.newSession({
 					parentSession: ctx.sessionManager.getSessionFile(),
 					withSession: async (next) => {
@@ -299,6 +304,7 @@ export default function (pi: ExtensionAPI) {
 			const model = ctx.modelRegistry.find(handoff.provider, handoff.id);
 			if (!model || !(await pi.setModel(model))) ctx.ui.notify(`Could not switch to ${handoff.provider}/${handoff.id}`, "error");
 			pi.setThinkingLevel(handoff.thinkingLevel);
+			if (handoff.file) pi.appendEntry(LIST, { file: handoff.file });
 		}
 		restore(event, ctx);
 	});
