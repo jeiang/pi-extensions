@@ -113,6 +113,9 @@ function spillDir(ctx: { sessionManager: { getSessionFile(): string | undefined 
 	return file ? `${file.replace(/\.jsonl$/, "")}/spill` : "";
 }
 
+/** Script-only tools listed first in the codemode description; the rest follow in registration order. */
+const FIRST = ["run", "job", "transfer", "read_text", "find", "ls", "substitute", "tool_docs", "sleep"];
+
 /** Captures the built-in codemode tool and re-registers it with the helpers and a guideline about writing programs. */
 export default function (pi: ExtensionAPI) {
 	let builtin: ToolDefinition | undefined;
@@ -133,9 +136,11 @@ export default function (pi: ExtensionAPI) {
 			? (loadout) => {
 					// A codemode tool activated by name, as a subagent's --tools list does, stays callable and is listed here, not declared.
 					const scriptOnly = loadout.declared.filter((tool) => loadout.getExposure(tool.name) === "codemode").map((tool) => tool.name);
+					// The description lists tools in this order until its budget runs out, so the ones scripts need most go first.
+					const rankOf = (name: string) => (FIRST.indexOf(name) + FIRST.length + 1) % (FIRST.length + 1);
 					const view: ToolLoadout = {
 						declared: loadout.declared.filter((tool) => !scriptOnly.includes(tool.name)),
-						callable: loadout.callable,
+						callable: [...loadout.callable].sort((a, b) => rankOf(a.name) - rankOf(b.name)),
 						registered: loadout.registered,
 						getExposure: (name) => loadout.getExposure(name),
 						getNamespace: (name) => loadout.getNamespace(name),

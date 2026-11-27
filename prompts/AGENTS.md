@@ -74,10 +74,9 @@ rather than `/tmp` files. A run() past `wait_seconds`, or with
 `background: true`, returns a job handle; `job` waits on it, reads it, or
 kills it. Write a script file only when it will be run again.
 
-Prefer the tool to the shell habit: `read` with `ranges` or a negative
-`offset` over `sed -n`, `cat`, or `tail`; `grep` over `grep -rn`;
-`replace` and `substitute` over `sed -i`; `run()`'s `tail` and its log
-file over piping into `tail`, `head`, or `grep`.
+Prefer the tool to the shell habit: the system prompt's tool-habits list
+names the tool for each, and `tool_docs` finds a tool for a job or gives
+one tool's parameters and examples.
 
 When a harness tool, guard, skill, or this file fails you, lacks a
 feature you expected, or misleads you, report it with `papercut` as it
