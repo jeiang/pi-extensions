@@ -366,8 +366,8 @@ export class LspClient {
 				// A server may clear a closed file's diagnostics; that push must land before the reopen, or it would read as the answer.
 				const cleared = this.nextPush(doc.uri, CLEAR_WAIT_MS);
 				await this.close(path);
-				await cleared;
-				return this.diagnostics(path, languageId, signal, after, true);
+				if (await cleared) return this.diagnostics(path, languageId, signal, after, true);
+				return this.settled(path, languageId, signal);
 			}
 			if (!provider && this.docs.get(doc.uri)?.version === doc.version) this.silent.set(doc.uri, doc.version);
 			return { status: "timeout", items: [] };
@@ -376,17 +376,39 @@ export class LspClient {
 		}
 	}
 
-	/** Resolves at the next push for `uri`, or after `ms`. */
-	private nextPush(uri: string, ms: number): Promise<void> {
+	/**
+	 * Diagnostics after a reopen whose clearing push has not come: it may still arrive first, so an
+	 * empty push is the answer only when nothing follows it before the deadline.
+	 */
+	private async settled(path: string, languageId: string, signal?: AbortSignal): Promise<DiagnosticsResult> {
+		const doc = await this.sync(path, languageId);
+		const deadline = Date.now() + this.timeouts.diagnosticsMs;
+		let seen = doc.sentAt;
+		let latest: Diagnostic[] | undefined;
+		while (Date.now() < deadline) {
+			if (signal?.aborted) throw new LspError("aborted");
+			await this.nextPush(doc.uri, deadline - Date.now());
+			const push = this.pushed.get(doc.uri);
+			if (!push || push.revision <= seen || (push.version !== undefined && push.version !== doc.version)) continue;
+			seen = push.revision;
+			if (push.diagnostics.length > 0) return { status: "fresh", items: push.diagnostics };
+			latest = push.diagnostics;
+		}
+		return latest ? { status: "fresh", items: latest } : { status: "timeout", items: [] };
+	}
+
+	/** Resolves true at the next push for `uri`, or false after `ms`. */
+	private nextPush(uri: string, ms: number): Promise<boolean> {
 		return new Promise((done) => {
 			const set = this.waiters.get(uri) ?? new Set();
-			const finish = () => {
+			const finish = (pushed: boolean) => {
 				clearTimeout(timer);
-				set.delete(finish);
-				done();
+				set.delete(onPush);
+				done(pushed);
 			};
-			const timer = setTimeout(finish, ms);
-			set.add(finish);
+			const onPush = () => finish(true);
+			const timer = setTimeout(() => finish(false), Math.max(0, ms));
+			set.add(onPush);
 			this.waiters.set(uri, set);
 		});
 	}
