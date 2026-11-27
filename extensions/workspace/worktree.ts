@@ -276,10 +276,13 @@ export function checkoutRelative(path: string, root: string): string | undefined
 	return rel;
 }
 
-/** Maps a path under the main checkout to the same path in the worktree; leaves others alone. */
+/**
+ * Maps a path under the main checkout to the same path in the worktree; leaves others alone.
+ * A relative `.worktrees/...` path names a worktree from the main checkout, so it resolves there.
+ */
 export function remapPath(path: string, root: string, worktree: string): string {
 	const raw = path.replace(/^@/, "");
-	if (!isAbsolute(raw)) return raw;
+	if (!isAbsolute(raw)) return raw === ".worktrees" || raw.startsWith(".worktrees/") ? join(root, raw) : raw;
 	const rel = checkoutRelative(raw, root);
 	return rel === undefined ? raw : join(worktree, rel);
 }

@@ -47,7 +47,8 @@ export function structuredFind(dir: string): ReturnType<typeof createFindToolDef
 	};
 }
 
-const MAX_TEXT_BYTES = 1024 * 1024;
+/** Scripts hold the text in memory; past this, read with ranges. */
+const MAX_TEXT_BYTES = 64 * 1024 * 1024;
 const readTextParams = Type.Object({ path: Type.String({ description: "File path, relative to the working directory or absolute." }) });
 const readTextSchema = Type.Object({
 	text: Type.String({ description: "The whole file, with \\r\\n turned into \\n." }),
@@ -59,16 +60,17 @@ export function readTextTool(dir: string): ToolDefinition<typeof readTextParams>
 	return {
 		name: "read_text",
 		label: "Read text",
-		description: `A text file's raw contents, for scripts to parse or transform (up to 1 MiB; use read with ranges for more). Scripts get { text, lines }; write a changed file back with write, or change one passage with replace.`,
+		description: `A text file's raw contents, for scripts to parse or transform (up to 64 MiB; use read with ranges for more). Scripts get { text, lines }; write a changed file back with write, or change one passage with replace.`,
 		parameters: readTextParams,
 		outputSchema: readTextSchema,
 		async execute(_id, input) {
 			const absolute = resolve(dir, input.path.replace(/^@/, ""));
 			const { size } = await stat(absolute);
-			if (size > MAX_TEXT_BYTES) throw new Error(`${input.path} is ${size} bytes, over 1 MiB; use read with ranges or offset/limit.`);
+			if (size > MAX_TEXT_BYTES) throw new Error(`${input.path} is ${size} bytes, over 64 MiB; use read with ranges or offset/limit.`);
 			const text = (await readFile(absolute, "utf8")).replace(/\r\n?/g, "\n");
 			const lines = text === "" ? 0 : text.replace(/\n$/, "").split("\n").length;
-			return { content: [{ type: "text", text }], details: undefined, structuredContent: { text, lines } };
+			// Scripts take the text from structuredContent; the content line keeps the transcript small.
+			return { content: [{ type: "text", text: `${input.path}: ${lines} lines, ${size} bytes` }], details: undefined, structuredContent: { text, lines } };
 		},
 	};
 }

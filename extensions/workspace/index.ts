@@ -43,6 +43,13 @@ import {
 } from "./worktree.ts";
 
 const ENTRY = "workspace-worktree";
+
+/** macOS names screenshots with a narrow no-break space before AM or PM; a typed path has a plain one. */
+export function withNarrowSpaces(absolute: string): string | undefined {
+	if (existsSync(absolute) || !/ (AM|PM)\b/.test(absolute)) return undefined;
+	const narrow = absolute.replace(/ (AM|PM)\b/g, "\u202f$1");
+	return existsSync(narrow) ? narrow : undefined;
+}
 const NEEDS_WORKTREE =
 	"The main checkout stays untouched. Call the worktree tool first (action create with a short kebab-case name, or enter with an existing branch); paths and git commands then resolve in that worktree.";
 
@@ -72,8 +79,9 @@ export default function (pi: ExtensionAPI) {
 	const READ_ONLY = new Set(["read", "grep", "find", "ls", "read_text"]);
 	const remapRead = (name: string, path: unknown) => {
 		const mapped = remap(path);
-		if (!READ_ONLY.has(name) || mapped === path || !worktree || existsSync(String(mapped))) return mapped;
-		return path;
+		if (!READ_ONLY.has(name)) return mapped;
+		const found = mapped === path || !worktree || existsSync(String(mapped)) ? mapped : path;
+		return typeof found === "string" ? withNarrowSpaces(resolve(cwd(), found)) ?? found : found;
 	};
 	const needsWorktree = () => guarded && !worktree;
 	const inMainCheckout = (path: string) => Boolean(repo && checkoutRelative(resolve(sessionCwd, path.replace(/^@/, "")), repo.root) !== undefined);

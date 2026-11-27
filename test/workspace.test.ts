@@ -392,6 +392,8 @@ test("remapPath follows a symlinked alias of the checkout but not a symlinked fi
 	assert.equal(remapPath(join(base, "alias", "sub", "new.txt"), root, wt), join(wt, "sub", "new.txt"));
 	assert.equal(remapPath(join(root, "link"), root, wt), join(wt, "link"));
 	assert.equal(remapPath(join(base, "other.txt"), root, wt), join(base, "other.txt"));
+	assert.equal(remapPath(".worktrees/other/a.txt", root, wt), join(root, ".worktrees", "other", "a.txt"));
+	assert.equal(remapPath("src/a.txt", root, wt), "src/a.txt");
 });
 
 test("subagent arguments keep the child to its agent's model, tools, and extensions", () => {
