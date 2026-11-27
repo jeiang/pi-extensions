@@ -51,6 +51,11 @@ const named = (input: Record<string, unknown>): string[] =>
 	Array.isArray(input.paths) ? input.paths.map(String) : typeof input.path === "string" ? [input.path] : [];
 
 export function effectsOf(tool: string, input: Record<string, unknown>, cwd: string): Effect {
+	// flake_update rewrites the flake's lock file; the other nix actions build in the store, not in the tree.
+	if (tool === "nix" && input.action === "flake_update") {
+		const flake = typeof input.flake === "string" && !input.flake.includes(":") ? resolve(cwd, input.flake) : cwd;
+		return { kind: "write", paths: [resolve(flake, "flake.lock")] };
+	}
 	if (READ_ONLY.has(tool) || READS.test(tool)) return tool === "lsp_apply" ? OPAQUE : READ;
 	switch (tool) {
 		case "edit":

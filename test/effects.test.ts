@@ -39,6 +39,7 @@ test("calls outside the filesystem are either known to change state or opaque", 
 	assert.equal(kind("worktree", { action: "list" }), "read");
 	for (const tool of ["run", "codemode", "subagent"]) assert.equal(kind(tool, { command: "rm -rf /" }), "opaque", tool);
 	assert.equal(kind("job", { action: "wait", job: "job1" }), "read");
+	assert.deepEqual(effectsOf("nix", { action: "flake_update" }, "/repo"), { kind: "write", paths: ["/repo/flake.lock"] });
 	assert.equal(kind("job", { action: "kill", job: "job1" }), "opaque");
 	assert.equal(kind("transfer", { host: "h", direction: "upload", local: "a", remote: "b" }), "opaque");
 });
