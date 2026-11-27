@@ -11,6 +11,8 @@ const SEARCH_AUTH = `Basic ${btoa("aWVSALXpZv:X8gPHnzL52wFEekuxsfQ9cSh")}`;
 const NIXHUB_API = "https://search.devbox.sh";
 const OPTION_APPLY = await readFile(new URL("./option.nix", import.meta.url), "utf8");
 const MAX_TEXT = 20_000;
+/** A build log per output; the tail is what matters and the whole result stays readable. */
+const LOG_TEXT = 8_000;
 const MAX_SHOWN_DRVS = 300;
 /** Derivations that take long to build from source; a hint beside nixpkgs' big-parallel feature. */
 const HEAVY_NAME = /^(gcc|clang|llvm|rustc|ghc|linux|chromium|firefox|thunderbird|webkitgtk|qtbase|qtwebengine|electron|libreoffice|nodejs|openjdk|zulu|go|swift)(-|$)/;
@@ -23,11 +25,12 @@ const params = Type.Object({
 			Type.Literal("eval"),
 			Type.Literal("drv_diff"),
 			Type.Literal("dry_run"),
+			Type.Literal("build"),
+			Type.Literal("log"),
 			Type.Literal("versions"),
 			Type.Literal("cache"),
 			Type.Literal("inputs"),
 		],
-		{ description: "See the tool description." },
 	),
 	query: Type.Optional(Type.String({ description: "search: words to find. versions: package name." })),
 	type: Type.Optional(Type.Union([Type.Literal("packages"), Type.Literal("options")], { description: "search: packages (default) or options." })),
@@ -40,13 +43,13 @@ const params = Type.Object({
 	apply: Type.Optional(Type.String({ description: "eval: function applied to the value." })),
 	outputs: Type.Optional(
 		Type.Array(Type.String(), {
-			description: "drv_diff, dry_run, cache: host names (system toplevel), .#attr, installables, or (cache) store paths.",
+			description: "drv_diff, dry_run, build, log, cache: host names (system toplevel), .#attr, installables, or (cache, log) store paths.",
 		}),
 	),
 	base: Type.Optional(Type.String({ description: "drv_diff: git revision to compare against; default HEAD." })),
 	version: Type.Optional(Type.String({ description: "versions: only this version." })),
 	stores: Type.Optional(Type.Array(Type.String(), { description: "cache: substituter URLs; default the configured ones." })),
-	store: Type.Optional(Type.String({ description: "dry_run: build against this store (`ssh-ng://host`) with local evaluation, instead of the local store." })),
+	store: Type.Optional(Type.String({ description: "dry_run, build: build against this store (`ssh-ng://host`) with local evaluation. log: read the log from it." })),
 	input: Type.Optional(Type.String({ description: "inputs: input to list or read; omit for all." })),
 	limit: Type.Optional(Type.Number({ description: "search, versions: most results (default 10)." })),
 });
@@ -69,12 +72,27 @@ const outputSchema = Type.Object({
 		}),
 	),
 	value: Type.Optional(Type.Unknown()),
-	diffs: Type.Optional(Type.Array(Type.Object({ output: Type.String(), before: Type.String(), after: Type.String(), same: Type.Boolean() }))),
+	diffs: Type.Optional(
+		Type.Array(
+			Type.Object({
+				output: Type.String(),
+				before: Type.Optional(Type.String()),
+				after: Type.Optional(Type.String()),
+				same: Type.Optional(Type.Boolean()),
+				error: Type.Optional(Type.String()),
+			}),
+		),
+	),
 	build: Type.Optional(Type.Array(Type.String({ description: "Not in any configured cache." }))),
 	fetch: Type.Optional(Type.Array(Type.String())),
 	download_mib: Type.Optional(Type.Number()),
 	unpacked_mib: Type.Optional(Type.Number()),
 	heavy: Type.Optional(Type.Array(Type.String({ description: "Likely heavy builds (big-parallel or compiler/kernel/browser names); a hint." }))),
+	built: Type.Optional(Type.Array(Type.Object({ output: Type.String(), drv: Type.String(), paths: Type.Array(Type.String()) }))),
+	logs: Type.Optional(
+		Type.Array(Type.Object({ output: Type.String(), text: Type.Optional(Type.String()), note: Type.Optional(Type.String()), error: Type.Optional(Type.String()) })),
+	),
+	errors: Type.Optional(Type.Array(Type.Object({ output: Type.String(), error: Type.String() }))),
 	versions: Type.Optional(
 		Type.Array(Type.Object({ version: Type.String(), commit: Type.String(), date: Type.String(), platforms: Type.Array(Type.String()), attr_paths: Type.Array(Type.String()) })),
 	),
@@ -102,7 +120,26 @@ function nix(args: string[], cwd: string, signal: AbortSignal | undefined): Prom
 }
 
 /** The last lines of a failed command's stderr, which hold nix's error. */
-const failure = (run: Run, what: string) => new Error(`${what} failed:\n${run.stderr.trim().split("\n").slice(-25).join("\n")}`);
+const lastLines = (stderr: string, lines = 25) => stderr.trim().split("\n").slice(-lines).join("\n");
+const failure = (run: Run, what: string) => new Error(`${what} failed:\n${lastLines(run.stderr)}`);
+const reason = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+interface Resolved {
+	ok: { output: string; value: string }[];
+	errors: { output: string; error: string }[];
+}
+
+/** Resolve each output on its own, so one that fails does not discard the others. */
+async function resolveEach(outputs: string[], resolve: (output: string) => Promise<string>): Promise<Resolved> {
+	const settled = await Promise.allSettled(outputs.map(resolve));
+	const resolved: Resolved = { ok: [], errors: [] };
+	settled.forEach((outcome, index) => {
+		const output = outputs[index]!;
+		if (outcome.status === "fulfilled") resolved.ok.push({ output, value: outcome.value });
+		else resolved.errors.push({ output, error: reason(outcome.reason) });
+	});
+	return resolved;
+}
 
 async function nixOk(args: string[], cwd: string, signal: AbortSignal | undefined): Promise<string> {
 	const run = await nix(args, cwd, signal);
@@ -287,6 +324,110 @@ async function git(args: string[], cwd: string): Promise<string> {
 	return new Promise((done, fail) => execFile("git", args, { cwd }, (error, stdout) => (error ? fail(error) : done(stdout.trim()))));
 }
 
+/** A flake attr name as a Nix string literal. */
+const nixString = (text: string) => JSON.stringify(text);
+
+/**
+ * A Nix expression selecting each attr path's drvPath under `root`, or null when the path or its
+ * drvPath is absent. `hasAttr` guards keep one missing attr from failing the whole evaluation, and
+ * tryEval keeps one broken attr from discarding the rest.
+ */
+export function drvPathExpr(paths: string[]): string {
+	const one = (path: string) => {
+		const steps = path.split(".");
+		const at = (count: number) => steps.slice(0, count).reduce((prefix, step) => `${prefix}.${nixString(step)}`, "root");
+		if (path === "") return `${nixString(path)} = if (builtins.hasAttr "drvPath" root) then builtins.tryEval root.drvPath else null`;
+		const guards = steps.map((step, index) => `builtins.hasAttr ${nixString(step)} ${at(index)}`);
+		guards.push(`builtins.hasAttr "drvPath" ${at(steps.length)}`);
+		return `${nixString(path)} = if (${guards.join(" && ")}) then builtins.tryEval (builtins.unsafeDiscardStringContext ${at(steps.length)}.drvPath) else null`;
+	};
+	return `root: { ${paths.map(one).join("; ")}; }`;
+}
+
+interface Drv {
+	drvPath?: string;
+	error?: string;
+}
+
+/** The error a broken attr reports, from the one evaluation that re-creates it. */
+async function drvError(ref: string, attr: string, cwd: string, signal: AbortSignal | undefined): Promise<string> {
+	const run = await nix(["eval", "--raw", `${ref}#${attr}.drvPath`], cwd, signal);
+	return lastLines(run.stderr, 10) || "evaluation failed";
+}
+
+/**
+ * Each attr's drvPath, with one `nix eval` per flake output attr. An attr the flake does not have
+ * stays out of the map, so a host can be looked for under another output; `missing` reports an
+ * output the flake does not evaluate at all.
+ */
+async function drvPaths(ref: string, attrs: string[], cwd: string, signal: AbortSignal | undefined): Promise<{ rows: Map<string, Drv>; missing?: string }> {
+	const rows = new Map<string, Drv>();
+	const groups = new Map<string, string[]>();
+	for (const attr of attrs) {
+		const group = attr.split(".")[0]!;
+		const members = groups.get(group) ?? [];
+		if (!members.includes(attr)) groups.set(group, [...members, attr]);
+	}
+	let missing: string | undefined;
+	for (const [group, members] of groups) {
+		const relative = members.map((attr) => attr.slice(group.length + 1));
+		const run = await nix(["eval", "--json", `${ref}#${group}`, "--apply", drvPathExpr(relative)], cwd, signal);
+		if (run.code !== 0) {
+			missing ??= lastLines(run.stderr, 10);
+			continue;
+		}
+		const parsed = JSON.parse(run.stdout) as Record<string, { success: boolean; value?: string } | null>;
+		for (let index = 0; index < members.length; index++) {
+			const attr = members[index]!;
+			const row = parsed[relative[index]!];
+			if (!row) continue;
+			rows.set(attr, row.success && row.value ? { drvPath: row.value } : { error: await drvError(ref, attr, cwd, signal) });
+		}
+	}
+	return { rows, missing };
+}
+
+/** Each host's system toplevel: the nixos configuration first, then the darwin one. */
+async function hostDrvs(ref: string, hosts: string[], cwd: string, signal: AbortSignal | undefined): Promise<Map<string, Drv>> {
+	const found = new Map<string, Drv>();
+	let missing: string | undefined;
+	for (const kind of ["nixos", "darwin"] as const) {
+		const rest = hosts.filter((host) => !found.has(host));
+		if (rest.length === 0) break;
+		const attrs = rest.map((host) => `${kind}Configurations.${host}.config.system.build.toplevel`);
+		const { rows, missing: groupMissing } = await drvPaths(ref, attrs, cwd, signal);
+		missing ??= groupMissing;
+		rest.forEach((host, index) => {
+			const row = rows.get(attrs[index]!);
+			if (row) found.set(host, row);
+		});
+	}
+	const some = found.size > 0;
+	for (const host of hosts) {
+		if (found.has(host)) continue;
+		found.set(host, { error: some || !missing ? `No nixosConfigurations or darwinConfigurations named ${host}.` : missing });
+	}
+	return found;
+}
+
+/** Each output's drvPath at `ref`; `.#attr` outputs keep their flake attr, host names their config. */
+async function drvsAt(ref: string, outputs: string[], cwd: string, signal: AbortSignal | undefined): Promise<Map<string, Drv>> {
+	const drvs = new Map<string, Drv>();
+	const hosts = outputs.filter((output) => /^[\w-]+$/.test(output));
+	if (hosts.length > 0) for (const [host, row] of await hostDrvs(ref, hosts, cwd, signal)) drvs.set(host, row);
+	const attrs = new Map<string, string>();
+	for (const output of outputs.filter((output) => !/^[\w-]+$/.test(output))) {
+		const installable = await installableOf(output, ".", cwd, signal);
+		if (!installable.startsWith(".#")) throw new Error(`drv_diff compares outputs of the flake; ${output} is not one.`);
+		attrs.set(output, installable.slice(2));
+	}
+	if (attrs.size > 0) {
+		const { rows, missing } = await drvPaths(ref, [...attrs.values()], cwd, signal);
+		for (const [output, attr] of attrs) drvs.set(output, rows.get(attr) ?? { error: missing ?? `No ${attr} in ${ref}.` });
+	}
+	return drvs;
+}
+
 async function drvDiff(input: Params, flakeDir: string, signal: AbortSignal | undefined): Promise<Output> {
 	if (!input.outputs?.length) throw new Error("drv_diff needs outputs.");
 	const root = await git(["rev-parse", "--show-toplevel"], flakeDir);
@@ -294,17 +435,20 @@ async function drvDiff(input: Params, flakeDir: string, signal: AbortSignal | un
 	const dir = relative(root, flakeDir);
 	// shallow=1 also accepts full clones; without it a shallow clone (as CI makes) refuses to fetch.
 	const baseRef = `git+file://${root}?rev=${rev}&shallow=1${dir ? `&dir=${encodeURIComponent(dir)}` : ""}`;
-	const diffs: NonNullable<Output["diffs"]> = [];
-	for (const output of input.outputs) {
-		const after = await installableOf(output, ".", flakeDir, signal);
-		if (!after.startsWith(".#")) throw new Error(`drv_diff compares outputs of the flake; ${output} is not one.`);
-		const attr = after.slice(2);
-		const [now, then] = await Promise.all([
-			nixOk(["eval", "--raw", `${after}.drvPath`], flakeDir, signal),
-			nixOk(["eval", "--raw", `${baseRef}#${attr}.drvPath`], flakeDir, signal),
-		]);
-		diffs.push({ output: attr, before: then, after: now, same: now === then });
-	}
+	const now = await drvsAt(".", input.outputs, flakeDir, signal);
+	const then = await drvsAt(baseRef, input.outputs, flakeDir, signal);
+	const diffs: NonNullable<Output["diffs"]> = input.outputs.map((output) => {
+		const after = now.get(output);
+		const before = then.get(output);
+		const error = after?.error ?? before?.error;
+		return {
+			output,
+			...(before?.drvPath ? { before: before.drvPath } : {}),
+			...(after?.drvPath ? { after: after.drvPath } : {}),
+			...(before?.drvPath && after?.drvPath ? { same: before.drvPath === after.drvPath } : {}),
+			...(error ? { error } : {}),
+		};
+	});
 	const untracked = (await git(["ls-files", "--others", "--exclude-standard"], flakeDir)).split("\n").filter((file) => file.endsWith(".nix"));
 	return {
 		action: "drv_diff",
@@ -320,8 +464,9 @@ export function dryRunArgs(installables: string[], store?: string): string[] {
 
 async function dryRun(input: Params, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<Output> {
 	if (!input.outputs?.length) throw new Error("dry_run needs outputs.");
-	const installables = await Promise.all(input.outputs.map((output) => installableOf(output, flake, cwd, signal)));
-	const run = await nix(dryRunArgs(installables, input.store), cwd, signal);
+	const { ok, errors } = await resolveEach(input.outputs, (output) => installableOf(output, flake, cwd, signal));
+	if (ok.length === 0) throw new Error(`dry_run resolved no output:\n${errors.map((entry) => `${entry.output}: ${entry.error}`).join("\n")}`);
+	const run = await nix(dryRunArgs(ok.map((entry) => entry.value), input.store), cwd, signal);
 	if (run.code !== 0) throw failure(run, "nix build --dry-run");
 	const parsed = parseDryRun(run.stderr);
 	return {
@@ -329,21 +474,58 @@ async function dryRun(input: Params, flake: string, cwd: string, signal: AbortSi
 		...parsed,
 		heavy: await heavyOf(parsed.build, cwd, signal),
 		note: input.store ? `Counted against ${input.store}; evaluation stayed local.` : "Counted against this machine's substituters; CI may use others.",
+		...(errors.length ? { errors } : {}),
 	};
+}
+
+/** `nix build` into the named store when given, with the same local evaluation as a dry run. */
+export function buildArgs(installables: string[], store?: string): string[] {
+	return ["build", "--no-link", "--json", ...(store ? ["--store", store, "--eval-store", "auto"] : []), ...installables];
+}
+
+async function build(input: Params, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<Output> {
+	if (!input.outputs?.length) throw new Error("build needs outputs.");
+	const { ok, errors } = await resolveEach(input.outputs, (output) => installableOf(output, flake, cwd, signal));
+	if (ok.length === 0) throw new Error(`build resolved no output:\n${errors.map((entry) => `${entry.output}: ${entry.error}`).join("\n")}`);
+	const run = await nix(buildArgs(ok.map((entry) => entry.value), input.store), cwd, signal);
+	if (run.code !== 0) throw failure(run, "nix build");
+	const parsed = JSON.parse(run.stdout || "[]") as { drvPath?: string; outputs?: Record<string, string> }[];
+	const built = ok.map(({ output }, index) => ({
+		output,
+		drv: parsed[index]?.drvPath ?? "",
+		paths: Object.values(parsed[index]?.outputs ?? {}),
+	}));
+	return { action: "build", built, ...(errors.length ? { errors } : {}) };
+}
+
+async function logs(input: Params, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<Output> {
+	if (!input.outputs?.length) throw new Error("log needs outputs.");
+	const { ok, errors } = await resolveEach(input.outputs, (output) => installableOf(output, flake, cwd, signal));
+	const rows: NonNullable<Output["logs"]> = [...errors];
+	for (const { output, value } of ok) {
+		const run = await nix(["log", ...(input.store ? ["--store", input.store] : []), value], cwd, signal);
+		if (run.code !== 0) {
+			rows.push({ output, error: lastLines(run.stderr, 10) });
+			continue;
+		}
+		const text = run.stdout.replace(/\u001b\[[0-9;]*m/g, "");
+		if (!text.trim()) rows.push({ output, note: "No log: nothing was built locally." });
+		else if (text.length > LOG_TEXT) rows.push({ output, text: text.slice(-LOG_TEXT), note: `Last ${LOG_TEXT} characters.` });
+		else rows.push({ output, text });
+	}
+	return { action: "log", logs: rows };
 }
 
 async function cache(input: Params, flake: string, cwd: string, signal: AbortSignal | undefined): Promise<Output> {
 	if (!input.outputs?.length) throw new Error("cache needs outputs.");
 	const stores = input.stores?.length ? input.stores : (await nixOk(["config", "show", "substituters"], cwd, signal)).trim().split(/\s+/).filter(Boolean);
-	const paths = await Promise.all(
-		input.outputs.map(async (output) => {
-			const installable = await installableOf(output, flake, cwd, signal);
-			return installable.startsWith("/nix/store/") ? installable : (await nixOk(["eval", "--raw", `${installable}.outPath`], cwd, signal)).trim();
-		}),
-	);
+	const { ok, errors } = await resolveEach(input.outputs, async (output) => {
+		const installable = await installableOf(output, flake, cwd, signal);
+		return installable.startsWith("/nix/store/") ? installable : (await nixOk(["eval", "--raw", `${installable}.outPath`], cwd, signal)).trim();
+	});
 	const rows = await Promise.all(
 		stores.flatMap((store) =>
-			paths.map(async (path) => {
+			ok.map(async ({ value: path }) => {
 				const run = await nix(["path-info", "--store", store, path], cwd, signal);
 				if (run.code === 0) return { store, path, status: "cached" };
 				if (/is not valid/.test(run.stderr)) return { store, path, status: "missing" };
@@ -351,7 +533,7 @@ async function cache(input: Params, flake: string, cwd: string, signal: AbortSig
 			}),
 		),
 	);
-	return { action: "cache", paths: rows };
+	return { action: "cache", paths: rows, ...(errors.length ? { errors } : {}) };
 }
 
 async function inputs(input: Params, flakeDir: string, signal: AbortSignal | undefined): Promise<Output> {
@@ -377,12 +559,16 @@ export default function (pi: ExtensionAPI) {
 		name: "nix",
 		label: "Nix",
 		description: [
-			"Nix lookups and validation; structured results.",
+			"Nix lookups, validation, and builds; structured results.",
 			"search: search.nixos.org packages or options. option: type, default, declarations, and the host's value, from the flake (NixOS and nix-darwin).",
-			"eval: nix eval --json. drv_diff: drvPaths vs base; same: true means nothing built changed. dry_run: builds and fetches, heavy builds marked.",
+			"eval: nix eval --json. drv_diff: drvPaths vs base; same: true means nothing built changed. dry_run: what a build would fetch or build, heavy builds marked.",
+			"build: nix build --no-link, returning the out paths. log: a derivation's build log, from a store path, installable, or host name.",
 			"versions: NixHub history. cache: cached/missing/unknown per substituter. inputs: flake inputs; list or read inside one.",
 		].join("\n"),
-		promptSnippet: "Nix search, option lookup, eval, drvPath diff, dry-run build list, cache check",
+		promptSnippet: "Nix search, option lookup, eval, drvPath diff, dry-run, cache check, build, log",
+		promptGuidelines: [
+			"Use the nix tool for nix eval, option lookups, drvPath diffs, dry runs, cache checks, builds, and build logs; keep nix develop and nix flake update in the shell.",
+		],
 		parameters: params,
 		outputSchema,
 		async execute(_id, input: Params, signal, _onUpdate, ctx): Promise<AgentToolResult<undefined>> {
@@ -401,6 +587,10 @@ export default function (pi: ExtensionAPI) {
 						return drvDiff(input, flakeDir, signal);
 					case "dry_run":
 						return dryRun(input, flake, flakeDir, signal);
+					case "build":
+						return build(input, flake, flakeDir, signal);
+					case "log":
+						return logs(input, flake, flakeDir, signal);
 					case "versions":
 						return versions(input, signal);
 					case "cache":
