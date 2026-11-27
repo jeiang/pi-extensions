@@ -13,9 +13,9 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@ian-pascoe/pi-lsp": "0.15.5",
     "@oh-my-pi/pi-natives": "18.22.2",
-    "pi-lens": "4.5.1",
-    "pi-web-access": "0.48.0"
+    "pi-web-access": "0.48.0",
+    "vscode-jsonrpc": "10.0.0",
+    "vscode-languageserver-protocol": "3.18.5"
   }
 }

@@ -82,10 +82,6 @@ When a harness tool, guard, skill, or this file fails you, lacks a
 feature you expected, or misleads you, report it with `papercut` as it
 happens, every time, repeats included, then carry on.
 
-pi-lens findings are leads, not orders: a 🔴 STOP is the linter's opinion,
-and a finding the code cannot fix, such as an import its interpreter does
-not have, gets said once and left alone. The repository's own checks decide.
-
 Delegate only to save context: `scout` to find code you cannot locate in
 two searches, `researcher` for a question that needs web sources or
 judgment, `change-reviewer` once on a finished branch before a pull
