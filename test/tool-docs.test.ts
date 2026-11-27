@@ -25,7 +25,8 @@ function registered(extension: (pi: never) => void): { name: string; description
 	return tools;
 }
 
-const ours = [workspace, github, nix, plan, goal, papercuts, toolDocs].flatMap(registered);
+// A hidden tool withdraws one of pi's; nothing calls it, so it needs no doc.
+const ours = [workspace, github, nix, plan, goal, papercuts, toolDocs].flatMap(registered).filter((tool) => tool.exposure !== "hidden");
 
 test("every tool these extensions register has a doc with its purpose, habits, and examples", () => {
 	const docs = loadDocs();

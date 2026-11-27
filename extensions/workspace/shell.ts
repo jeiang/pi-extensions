@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, write, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
 	type ExtensionAPI,
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
+import { promisify } from "node:util";
 import { type Static, Type } from "typebox";
 import { type TrackedJob, trackedJob, trackedJobs } from "./jobs.ts";
 
@@ -22,6 +23,8 @@ export function waitBound(input: { wait_on?: string; wait_seconds?: number }, fa
 const TAIL_LINES = 30;
 /** A shell command's stderr is captured separately, so a JSON payload on stdout stays parseable. */
 const STDERR_MAX_BYTES = 256 * 1024;
+/** A pipe write that waits off the event loop, so a full pipe never freezes the session. */
+const writeFd = promisify(write);
 const quotePath = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
 /** The command under a pty, so a program that insists on a terminal (sudo) can prompt. The inner shell writes its pid, which is its session's id too. */
@@ -267,7 +270,6 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			execFileSync("mkfifo", [stdinFile]);
 			// Read-write, so opening the pipe does not wait for the reader.
 			stdinFd = openSync(stdinFile, "r+");
-			if (start.stdin) writeSync(stdinFd, start.stdin);
 		} else if (start.stdin !== undefined) {
 			stdinFile = join(logDir, `${process.pid}-${id}.in`);
 			writeFileSync(stdinFile, start.stdin);
@@ -332,6 +334,8 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 						// The file is gone already.
 					}
 		});
+		// The reader runs now, so text more than a pipe holds drains instead of blocking.
+		if (start.interactive && start.stdin && stdinFd !== undefined) void writeFd(stdinFd, start.stdin).catch(() => undefined);
 		jobs.set(id, job);
 		return job;
 	};
@@ -485,6 +489,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 		parameters: runParams,
 		outputSchema: shellOutputSchema,
 		async execute(_id, input: RunParams, signal, onUpdate) {
+			if (input.host !== undefined && !input.host.trim()) throw new Error("host is empty; leave it out to run locally.");
 			if (input.ssh && !input.host) throw new Error("ssh options need a host.");
 			if (input.host && input.devshell) throw new Error("devshell applies to local commands; a host runs its own shell.");
 			const command = input.host
@@ -572,7 +577,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			}
 			if (input.action === "write") {
 				if (job.stdin === undefined) throw new Error(`${job.id} has no open stdin; start it with run interactive: true.`);
-				writeSync(job.stdin, input.input ?? "");
+				await writeFd(job.stdin, input.input ?? "");
 				return progress(job, "Sent.", input.tail);
 			}
 			if (input.action === "read") {

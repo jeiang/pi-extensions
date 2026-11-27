@@ -1,5 +1,6 @@
 import {
 	type BashOperations,
+	createBashToolDefinition,
 	createLocalBashOperations,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -158,6 +159,8 @@ export default function (pi: ExtensionAPI) {
 	override(structuredLs, { exposure: "codemode" });
 	override(readTextTool, { exposure: "codemode" });
 
+	// pi's own bash would run commands past the guards and outside the devshell; run replaces it.
+	pi.registerTool({ ...createBashToolDefinition(sessionCwd), exposure: "hidden" });
 	const ssh = registerSsh(pi, () => env(cwd()), (path) => cwd(path));
 	registerShell(pi, { cwd, env, devshellError: (dir, name) => devshellErrors.get(name ? `${dir}#${name}` : dir), sshCommand: ssh.command });
 	registerSubagent(pi, { cwd: () => cwd(), env });

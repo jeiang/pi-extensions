@@ -239,7 +239,7 @@ export default function (pi: ExtensionAPI) {
 				if (!verdict.allowed) return block(verdict.why, violation);
 			}
 			// A command on another host runs elsewhere, so a path in it is not a local folder.
-			if (typeof input.host === "string") return;
+			if (typeof input.host === "string" && input.host.trim() !== "") return;
 			const dir = typeof input.cwd === "string" ? resolve(sessionDir(ctx), input.cwd) : sessionDir(ctx);
 			const switching = switchViolation(command, dir);
 			if (switching) {
@@ -249,6 +249,15 @@ export default function (pi: ExtensionAPI) {
 			const folder = commandMentionsRestricted(command) ?? (typeof input.cwd === "string" ? restrictedFolder(input.cwd, sessionDir(ctx)) : undefined);
 			if (folder && (!readableFolder(folder) || writesInto(command, folder))) {
 				const verdict = await ask(ctx, `Allow ${readableFolder(folder) ? "a write to" : "access to"} ${folder}?`, command);
+				if (!verdict.allowed) return block(verdict.why, `${folder} is restricted.`);
+			}
+			return;
+		}
+		if (enabled && event.toolName === "transfer" && typeof input.local === "string") {
+			// An upload reads the local path, a download writes it.
+			const folder = restrictedFolder(input.local, sessionDir(ctx));
+			if (folder && !(input.direction === "upload" && readableFolder(folder))) {
+				const verdict = await ask(ctx, `Allow transfer ${input.direction === "upload" ? "from" : "into"} ${folder}?`, `${input.local} ${input.direction === "upload" ? "->" : "<-"} ${String(input.host)}:${String(input.remote)}`);
 				if (!verdict.allowed) return block(verdict.why, `${folder} is restricted.`);
 			}
 			return;

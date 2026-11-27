@@ -58,7 +58,6 @@ const OPS = [
 	"repo_tree",
 	"api",
 ] as const;
-type Op = (typeof OPS)[number];
 
 const params = Type.Object({
 	op: Type.Union(
@@ -193,17 +192,26 @@ interface Target {
 export const TRANSIENT = /HTTP 5\d\d|\b50[0234]\b|Bad Gateway|Service Unavailable|Something went wrong|ECONNRESET|ETIMEDOUT|i\/o timeout/i;
 const ATTEMPTS = 3;
 
-/** Runs gh, trying a read again after a transient failure; a write tries again only when `settled` finds it did not happen. */
-async function ghRun(target: Target, args: string[], settled?: () => Promise<boolean>): Promise<{ stdout: string; stderr: string }> {
+/**
+ * Runs gh, trying a read again after a transient failure. A write (`write` set) tries again only when
+ * `settled` shows it did not happen; with no check, or a check that fails, its error stands, since the
+ * request may have gone through.
+ */
+async function ghRun(target: Target, args: string[], write?: { settled?: () => Promise<boolean> }): Promise<{ stdout: string; stderr: string }> {
 	const env = target.repo ? { ...process.env, GH_REPO: target.repo } : process.env;
 	for (let attempt = 1; ; attempt++) {
 		try {
 			return await run("gh", args, { cwd: target.cwd, env, maxBuffer: 32 * 1024 * 1024 });
 		} catch (error) {
 			const message = `${(error as { stderr?: string }).stderr ?? ""}\n${(error as Error).message}`;
-			if (attempt >= ATTEMPTS || !TRANSIENT.test(message)) throw new Error(((error as { stderr?: string }).stderr || (error as Error).message).trim());
+			const failure = new Error(((error as { stderr?: string }).stderr || (error as Error).message).trim());
+			if (attempt >= ATTEMPTS || !TRANSIENT.test(message) || (write && !write.settled)) throw failure;
 			await sleep(2000 * attempt);
-			if (settled && (await settled().catch(() => false))) return { stdout: "", stderr: "" };
+			if (write?.settled) {
+				const done = await write.settled().catch(() => undefined);
+				if (done === undefined) throw failure;
+				if (done) return { stdout: "", stderr: "" };
+			}
 		}
 	}
 }
@@ -356,7 +364,7 @@ export default function (pi: ExtensionAPI) {
 					const head = input.head ?? (await run("git", ["branch", "--show-current"], { cwd }).then((r) => r.stdout.trim(), () => ""));
 					const existing = async () => (head ? (await gh<{ url: string }[]>(target, ["pr", "list", "--head", head, "--json", "url"]))[0]?.url : undefined);
 					try {
-						const { stdout } = await ghRun(target, args, async () => Boolean(await existing()));
+						const { stdout } = await ghRun(target, args, { settled: async () => Boolean(await existing()) });
 						const url = stdout.trim().split("\n").at(-1) || (await existing());
 						return view(url);
 					} catch (error) {
@@ -367,19 +375,22 @@ export default function (pi: ExtensionAPI) {
 				}
 				case "pr_merge": {
 					const method = need("method") as string;
+					// GitHub refuses the merge itself when the head moved since this check, so a push in between cannot slip in.
+					let head: string[] = [];
 					if (input.expect_head) {
 						const found = await fetchPr(input.pr);
 						if (!found.headRefOid.startsWith(input.expect_head)) throw new Error(`PR #${found.number} (${found.headRefName}) has head ${found.headRefOid}, not ${input.expect_head}; nothing merged.`);
+						head = ["--match-head-commit", found.headRefOid];
 					}
-					const args = ["pr", "merge", ...(input.pr ? [input.pr] : []), `--${method}`, ...(input.delete_branch ? ["--delete-branch"] : [])];
+					const args = ["pr", "merge", ...(input.pr ? [input.pr] : []), `--${method}`, ...head, ...(input.delete_branch ? ["--delete-branch"] : [])];
 					const merged = async () => Boolean((await fetchPr(input.pr)).mergedAt);
 					let notes: string;
 					try {
-						notes = (await ghRun(target, [...args, ...(input.auto ? ["--auto"] : [])], merged)).stderr;
+						notes = (await ghRun(target, [...args, ...(input.auto ? ["--auto"] : [])], { settled: merged })).stderr;
 					} catch (error) {
 						// GitHub refuses auto-merge for a PR that is mergeable already; merge it now instead.
 						if (!input.auto || !/clean status|enablePullRequestAutoMerge|auto-merge is not allowed|Protected branch rules not configured/i.test((error as Error).message)) throw error;
-						notes = `Auto-merge was refused (${(error as Error).message.split("\n")[0]}); merged now instead.\n${(await ghRun(target, args, merged)).stderr}`;
+						notes = `Auto-merge was refused (${(error as Error).message.split("\n")[0]}); merged now instead.\n${(await ghRun(target, args, { settled: merged })).stderr}`;
 					}
 					// gh notes on stderr when it cannot delete a branch checked out in a worktree; the merge still happened.
 					return view(input.pr, notes.trim() ? `${notes.trim()}\n` : "");
@@ -415,12 +426,12 @@ export default function (pi: ExtensionAPI) {
 					return reply(op, prs.map((p) => `#${p.number} ${p.state} ${p.branch}: ${p.title} ${p.url}`).join("\n") || "No pull requests.", { prs });
 				}
 				case "pr_comment": {
-					const url = (await ghRun(target, ["pr", "comment", ...(input.pr ? [input.pr] : []), "--body", need("body") as string])).stdout.trim();
+					const url = (await ghRun(target, ["pr", "comment", ...(input.pr ? [input.pr] : []), "--body", need("body") as string], {})).stdout.trim();
 					return reply(op, url, { output: url });
 				}
 				case "pr_close": {
 					const args = ["pr", "close", ...(input.pr ? [input.pr] : []), ...(input.body ? ["--comment", input.body] : []), ...(input.delete_branch ? ["--delete-branch"] : [])];
-					const { stderr } = await ghRun(target, args, async () => (await fetchPr(input.pr)).state !== "OPEN");
+					const { stderr } = await ghRun(target, args, { settled: async () => (await fetchPr(input.pr)).state !== "OPEN" });
 					return view(input.pr, stderr.trim() ? `${stderr.trim()}\n` : "");
 				}
 				case "pr_edit": {
@@ -429,6 +440,7 @@ export default function (pi: ExtensionAPI) {
 					if (input.title !== undefined) args.push("--title", input.title);
 					if (input.body !== undefined) args.push("--body", input.body);
 					if (input.base !== undefined) args.push("--base", input.base);
+					// An edit sets fields to values, so repeating it changes nothing.
 					await ghRun(target, args);
 					return view(input.pr);
 				}
@@ -450,7 +462,7 @@ export default function (pi: ExtensionAPI) {
 				case "workflow_run": {
 					const args = ["workflow", "run", need("workflow") as string, ...(input.ref ? ["--ref", input.ref] : [])];
 					for (const [key, value] of Object.entries(input.inputs ?? {})) args.push("-f", `${key}=${value}`);
-					const { stdout, stderr } = await ghRun(target, args);
+					const { stdout, stderr } = await ghRun(target, args, {});
 					const output = `${stdout}${stderr}`.trim() || "Dispatched.";
 					return reply(op, `${output}\nrun_list with workflow finds the run; run_watch with run watches it.`, { output });
 				}
