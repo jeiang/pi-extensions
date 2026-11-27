@@ -72,6 +72,16 @@ return [done.output.includes("got:hello"), sudo.exit_code !== 0, sudo.wall_time_
 	assert.match(ok.result, /\[true,\s*true,\s*true\]/);
 });
 
+test("input written to a job arrives after initial input larger than a pipe holds", async () => {
+	const ok = await script(`const big = "a".repeat(1 << 20);
+const h = await run("head -c " + ((1 << 20) + 6) + " > out.txt", { interactive: true, stdin: big, background: true });
+await h.write("MARKER");
+await h.wait({ wait_seconds: 10 });
+const text = await fs.text("out.txt");
+return [text.length, text.endsWith("MARKER"), text.indexOf("M")];`);
+	assert.match(ok.result, /\[1048582,\s*true,\s*1048576\]/);
+});
+
 test("fs writes a file and reads back a window of it", async () => {
 	const ok = await script(`await fs.write("notes.txt", "one\\ntwo\\nthree\\n");
 return (await fs.rows("notes.txt", 1, 2)).includes("2:");`);

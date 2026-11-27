@@ -73,6 +73,8 @@ interface Job {
 	done: Promise<void>;
 	/** The write end of an interactive job's stdin pipe. */
 	stdin?: number;
+	/** The last pending write to it; each write waits for the one before, so input arrives in order. */
+	written?: Promise<unknown>;
 	/** Set once a result reached the agent, so the exit wake-up is not sent too. */
 	claimed?: boolean;
 }
@@ -335,7 +337,7 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 					}
 		});
 		// The reader runs now, so text more than a pipe holds drains instead of blocking.
-		if (start.interactive && start.stdin && stdinFd !== undefined) void writeFd(stdinFd, start.stdin).catch(() => undefined);
+		if (start.interactive && start.stdin && stdinFd !== undefined) job.written = writeFd(stdinFd, start.stdin).catch(() => undefined);
 		jobs.set(id, job);
 		return job;
 	};
@@ -577,7 +579,11 @@ export function registerShell(pi: ExtensionAPI, options: ShellOptions) {
 			}
 			if (input.action === "write") {
 				if (job.stdin === undefined) throw new Error(`${job.id} has no open stdin; start it with run interactive: true.`);
-				await writeFd(job.stdin, input.input ?? "");
+				const fd = job.stdin;
+				const text = input.input ?? "";
+				const sent = (job.written ?? Promise.resolve()).then(() => writeFd(fd, text));
+				job.written = sent.catch(() => undefined);
+				await sent;
 				return progress(job, "Sent.", input.tail);
 			}
 			if (input.action === "read") {
