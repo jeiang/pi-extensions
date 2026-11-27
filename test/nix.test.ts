@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dryRunArgs, parseDryRun } from "../extensions/nix/index.ts";
+import { buildArgs, dryRunArgs, drvPathExpr, parseDryRun } from "../extensions/nix/index.ts";
 
 test("parseDryRun reads the build and fetch lists and sizes, in singular and plural forms", () => {
 	const plural = parseDryRun(
@@ -37,4 +37,17 @@ test("dry_run keeps evaluation local and sends the build to the named store", ()
 		"auto",
 		".#host",
 	]);
+});
+
+test("drvPathExpr guards every step so one absent or broken attr leaves the rest", () => {
+	const expr = drvPathExpr(["nixosConfigurations.alda.config.system.build.toplevel"]);
+	assert.ok(expr.includes('"nixosConfigurations.alda.config.system.build.toplevel" = if (builtins.hasAttr "nixosConfigurations" root'));
+	assert.ok(expr.includes('builtins.hasAttr "drvPath" root."nixosConfigurations"."alda"."config"."system"."build"."toplevel"'));
+	assert.ok(expr.includes('builtins.tryEval (builtins.unsafeDiscardStringContext root."nixosConfigurations"."alda"."config"."system"."build"."toplevel".drvPath)'));
+	assert.ok(expr.endsWith("else null; }"));
+});
+
+test("build keeps the same local evaluation as a dry run and prints JSON", () => {
+	assert.deepEqual(buildArgs([".#host"]), ["build", "--no-link", "--json", ".#host"]);
+	assert.deepEqual(buildArgs([".#host"], "ssh-ng://artemis"), ["build", "--no-link", "--json", "--store", "ssh-ng://artemis", "--eval-store", "auto", ".#host"]);
 });
