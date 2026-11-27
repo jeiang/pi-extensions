@@ -19,8 +19,9 @@
         npmDeps = pkgs.importNpmLock {npmRoot = ./.;};
         inherit (pkgs.importNpmLock) npmConfigHook;
         npmBuildScript = "check";
-        # The grep and find tests run pi's grep and find, which need rg and fd on PATH.
-        nativeBuildInputs = [pkgs.git pkgs.bun pkgs.ripgrep pkgs.fd];
+        # The grep and find tests run pi's grep and find, which need rg and fd on PATH; the pty test
+        # needs script(1), which macOS ships and Linux gets from util-linux.
+        nativeBuildInputs = [pkgs.git pkgs.bun pkgs.ripgrep pkgs.fd] ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.util-linux;
         preBuild = "export HOME=$TMPDIR";
         installPhase = ''
           runHook preInstall
