@@ -30,6 +30,7 @@ import {
 	deleteBranch,
 	detectRepo,
 	enterWorktree,
+	fastForwardBranch,
 	fastForwardMain,
 	mergedBranch,
 	ownWorktrees,
@@ -252,10 +253,11 @@ const worktreeParams = Type.Object({
 			Type.Literal("list"),
 			Type.Literal("prune"),
 			Type.Literal("carry"),
+			Type.Literal("ff_main"),
 		]),
 		name: Type.Optional(
 			Type.String({
-				description: "create: short kebab-case name for the new branch and directory. enter: an existing local or origin branch. remove with repo: the branch whose worktree to delete.",
+				description: "create: short kebab-case name for the new branch and directory. enter: an existing local or origin branch. remove with repo: the branch whose worktree to delete. ff_main: the branch or commit to fast-forward the default branch to.",
 			}),
 		),
 		paths: Type.Optional(Type.Array(Type.String(), { description: "carry: paths changed in the main checkout to move into this worktree." })),
@@ -263,11 +265,18 @@ const worktreeParams = Type.Object({
 		repo: Type.Optional(
 			Type.String({
 				description:
-					"Another repository's main checkout (absolute path) to run create, enter, remove, list, or prune in. The session stays where it is; run commands in the new worktree through the cwd parameter of shell or bash.",
+					"Another repository's main checkout (absolute path) to run create, enter, remove, list, prune, or ff_main in. The session stays where it is; run commands in the new worktree through the cwd parameter of shell or bash.",
 			}),
 		),
 	});
 	const text = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: undefined });
+	/** Fast-forwards the default branch to `target`, or to origin's copy of it. */
+	const fastForwardDefault = async (root: string, target: string | undefined) => {
+		const base = await baseRef(root);
+		const main = base.replace(/^origin\//, "");
+		if (main === "HEAD") throw new Error("No default branch (main or master) to fast-forward.");
+		return `${await fastForwardBranch(root, main, target ?? base)} This is local; push only when the user asked.`;
+	};
 	/** Worktree actions in a repository other than the session's; the session's directory stays unchanged. */
 	const inOtherRepo = async (root: string, input: Static<typeof worktreeParams>) => {
 		const hint = "Run commands there with the cwd parameter of shell or bash and use absolute file paths; this session's directory is unchanged.";
@@ -298,6 +307,8 @@ const worktreeParams = Type.Object({
 				await fastForwardMain(root, base);
 				return text(removed.length ? `Removed:\n${removed.join("\n")}` : "Nothing merged to prune.");
 			}
+			case "ff_main":
+				return text(await fastForwardDefault(root, input.name));
 			case "exit":
 				throw new Error("exit applies to this session's worktree; call it without repo.");
 			case "carry":
@@ -309,8 +320,8 @@ const worktreeParams = Type.Object({
 		name: "worktree",
 		label: "Worktree",
 		description:
-			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. exit: leave the current worktree, remove it, and return to the main checkout; a merged branch is deleted and an unmerged one kept. list. prune: delete clean worktrees whose work is merged, the current one and a detached one included, and their branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. Writes in the main checkout are blocked until create or enter.",
-		promptSnippet: "Create, enter, exit, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in. Create one before writing",
+			"Control this session's git worktree under .worktrees/, or with repo, worktrees of another repository. create: a new branch from the default branch. enter: an existing branch, reusing its worktree. remove: delete the current worktree and keep its branch. exit: leave the current worktree, remove it, and return to the main checkout; a merged branch is deleted and an unmerged one kept. list. prune: delete clean worktrees whose work is merged, the current one and a detached one included, and their branches; call it once a branch merges. carry: move uncommitted changes to paths in the main checkout (such as a file the user edited there) into the current worktree, leaving the main checkout clean. ff_main: fast-forward the default branch to name, else this worktree's branch, else origin's default branch; anything but a fast-forward is refused, and nothing is pushed. Writes in the main checkout are blocked until create or enter.",
+		promptSnippet: "Create, enter, exit, remove, list, or prune .worktrees/ worktrees; carry main-checkout changes in; fast-forward main. Create one before writing",
 		parameters: worktreeParams,
 		exposure: "model-only",
 		async execute(_id, input: Static<typeof worktreeParams>, _signal, _onUpdate, ctx) {
@@ -388,6 +399,8 @@ const worktreeParams = Type.Object({
 					const status = await carryChanges(root, worktree.path, input.paths.map((p) => p.replace(/^@/, "")));
 					return text(`Moved into ${worktree.path}:\n${status}`);
 				}
+				case "ff_main":
+					return text(await fastForwardDefault(root, input.name ?? worktree?.branch));
 			}
 			throw new Error(`Unknown action ${String(input.action)}.`);
 		},
