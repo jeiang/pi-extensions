@@ -8,7 +8,7 @@ import { cacheUsable, fromNulEnv } from "../extensions/workspace/devshell.ts";
 import workspace from "../extensions/workspace/index.ts";
 import { grepRoute, jobCommand, lastLines, progressBar, ttyCommand, ttyOutput, waitBound } from "../extensions/workspace/shell.ts";
 import { childArgs, loadAgents, sessionDigest, sessionExists, sessionTail } from "../extensions/workspace/subagent.ts";
-import { carryChanges, createWorktree, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
+import { carryChanges, createWorktree, fastForwardBranch, pruneWorktrees, remapPath, removeWorktree } from "../extensions/workspace/worktree.ts";
 import { type Call, createTestSession, type Reply, scriptedProviders } from "./harness.ts";
 
 function repo(): string {
@@ -145,6 +145,27 @@ test("a session removes its worktree, is blocked again, and enters or creates an
 	assert.equal(readFileSync(join(dir, ".worktrees", "second", "c.txt"), "utf8"), "c\n");
 	assert.equal(execFileSync("git", ["show", "first:a.txt"], { cwd: dir, encoding: "utf8" }), "a\n");
 	assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }), "");
+});
+
+test("ff_main fast-forwards main in the main checkout or by ref, and refuses a diverged branch", async () => {
+	const dir = repo();
+	const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
+	const feat = await createWorktree(dir, "feat");
+	writeFileSync(join(feat.path, "README"), "feat\n");
+	git(feat.path, "commit", "-qam", "feat");
+	assert.match(await fastForwardBranch(dir, "main", "feat"), /fast-forwarded/);
+	assert.equal(readFileSync(join(dir, "README"), "utf8"), "feat\n");
+	git(dir, "branch", "side", "main~1");
+	await fastForwardBranch(dir, "side", "main");
+	assert.equal(git(dir, "rev-parse", "side"), git(dir, "rev-parse", "main"));
+	writeFileSync(join(dir, "other"), "x\n");
+	git(dir, "add", "other");
+	git(dir, "commit", "-qm", "main moves");
+	writeFileSync(join(feat.path, "README"), "feat 2\n");
+	git(feat.path, "commit", "-qam", "feat 2");
+	const before = git(dir, "rev-parse", "main");
+	await assert.rejects(fastForwardBranch(dir, "main", "feat"), /does not contain main/);
+	assert.equal(git(dir, "rev-parse", "main"), before);
 });
 
 test("remove refuses a worktree with uncommitted changes and keeps the branch", async () => {

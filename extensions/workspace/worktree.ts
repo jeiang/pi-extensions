@@ -225,6 +225,23 @@ export async function fastForwardMain(root: string, base: string) {
 	await tryGit(root, "merge", "--ff-only", "--quiet", base);
 }
 
+/**
+ * Fast-forwards local `branch` to `target` and refuses anything else. Where `branch` is checked out,
+ * that checkout merges, so a local edit that conflicts stops it.
+ */
+export async function fastForwardBranch(root: string, branch: string, target: string): Promise<string> {
+	const from = await tryGit(root, "rev-parse", "--verify", "-q", `refs/heads/${branch}`);
+	const to = await tryGit(root, "rev-parse", "--verify", "-q", `${target}^{commit}`);
+	if (!from) throw new Error(`No local branch ${branch}.`);
+	if (!to) throw new Error(`No commit ${target}.`);
+	if (from === to) return `${branch} is already at ${target} (${to.slice(0, 12)}).`;
+	if ((await tryGit(root, "merge-base", "--is-ancestor", from, to)) === undefined) throw new Error(`${target} does not contain ${branch}; merge or rebase it first.`);
+	const holder = (await listWorktrees(root)).find((w) => w.branch === branch);
+	if (holder) await git(holder.path, "merge", "--ff-only", "--quiet", to);
+	else await git(root, "update-ref", `refs/heads/${branch}`, to, from);
+	return `${branch} fast-forwarded ${from.slice(0, 12)}..${to.slice(0, 12)} (${target}).`;
+}
+
 async function allowDirenv(root: string, worktree: string) {
 	const main = join(root, ".envrc");
 	const copy = join(worktree, ".envrc");
