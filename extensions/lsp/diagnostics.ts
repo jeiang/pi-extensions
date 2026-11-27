@@ -185,7 +185,7 @@ export async function reports(service: Service, paths: string[], signal?: AbortS
 export const renderFinding = (finding: Finding, report: FileReport, cwd: string) =>
 	diagnosticLine(displayPath(report.path, cwd), report.text, finding.diagnostic, finding.encoding);
 
-/** Lines of the changed region of `after` against `before`, 0-based inclusive; undefined when nothing changed. */
+/** The changed region of the old text, 0-based inclusive lines; undefined when nothing changed. */
 function changedLines(before: string, after: string): [number, number] | undefined {
 	if (before === after) return undefined;
 	const a = lines(before);
@@ -198,12 +198,13 @@ function changedLines(before: string, after: string): [number, number] | undefin
 		endA--;
 		endB--;
 	}
-	return [start, Math.max(start, endB)];
+	return [start, Math.max(start, endA)];
 }
 
 /**
- * New errors in files that reference the declarations an edit touched: the server is shown the
- * old text for a baseline of those files, then the new text again.
+ * New errors in files that reference the declarations an edit touched. The server is shown the old
+ * text to find those declarations (a removed one included) and its references and to take a
+ * baseline of the referencing files, then the new text again.
  */
 export async function dependentErrors(service: Service, path: string, before: string, after: string, deadline: number): Promise<{ lines: string[]; scanned: number }> {
 	const changed = changedLines(before, after);
@@ -215,6 +216,8 @@ export async function dependentErrors(service: Service, path: string, before: st
 		const client = await service.client(route).catch(() => undefined);
 		if (!client?.capabilities.referencesProvider || !client.capabilities.documentSymbolProvider) continue;
 		const uri = pathToFileURL(path).href;
+		await client.sync(path, route.languageId, before);
+		try {
 		const symbols = flattenSymbols(
 			(await client.request<(DocumentSymbol | SymbolInformation)[] | null>("textDocument/documentSymbol", { textDocument: { uri } }).catch(() => null)) ?? [],
 		);
@@ -250,12 +253,15 @@ export async function dependentErrors(service: Service, path: string, before: st
 			}
 			return map;
 		};
-		await client.sync(path, route.languageId, before);
 		const baseline = await errorsOf();
 		await client.sync(path, route.languageId, after);
 		const now = await errorsOf();
 		scanned += dependents.length;
 		for (const [file, report] of now) for (const finding of newFindings(baseline.get(file), report).added) out.push(renderFinding(finding, report, service.cwd));
+		} finally {
+			// The server holds the file's text as it is on disk again, whatever failed above.
+			await client.sync(path, route.languageId, after).catch(() => undefined);
+		}
 	}
 	return { lines: out, scanned };
 }

@@ -97,6 +97,40 @@ test("a write that fails part way puts back the files already written", async ()
 	assert.equal(readFileSync(b, "utf8"), "x\n");
 });
 
+test("a move that fails part way restores the file it overwrote, and a recreated file is not deleted", async () => {
+	const dir = temp();
+	const locked = join(dir, "locked");
+	mkdirSync(locked);
+	const source = join(locked, "s.txt");
+	const target = join(dir, "t.txt");
+	writeFileSync(source, "source\n");
+	writeFileSync(target, "target\n");
+	const preview = storePreview("test", await planWorkspaceEdit({ documentChanges: [{ kind: "rename", oldUri: uri(source), newUri: uri(target), options: { overwrite: true } }] }, "utf-16"));
+	chmodSync(locked, 0o555);
+	try {
+		await assert.rejects(applyPreview(preview.token), /rolled back/);
+	} finally {
+		chmodSync(locked, 0o755);
+	}
+	assert.equal(readFileSync(target, "utf8"), "target\n");
+	assert.equal(readFileSync(source, "utf8"), "source\n");
+
+	const file = join(dir, "r.txt");
+	writeFileSync(file, "old\n");
+	const changes = await planWorkspaceEdit(
+		{
+			documentChanges: [
+				{ kind: "delete", uri: uri(file) },
+				{ kind: "create", uri: uri(file) },
+				{ textDocument: { uri: uri(file), version: null }, edits: [{ range: { start: at(0, 0), end: at(0, 0) }, newText: "new\n" }] },
+			],
+		},
+		"utf-16",
+	);
+	await applyPreview(storePreview("test", changes).token);
+	assert.equal(readFileSync(file, "utf8"), "new\n");
+});
+
 test("an edit's result lists only the findings it introduced; rename previews, then applies with the token", async () => {
 	const dir = temp();
 	const agentDir = temp();

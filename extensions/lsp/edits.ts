@@ -98,6 +98,7 @@ export async function planWorkspaceEdit(edit: WorkspaceEdit, encoding: Encoding)
 				throw new Error(`${change.path} already exists.`);
 			}
 			change.after = "";
+			change.delete = false;
 		} else if (op.kind === "rename") {
 			const source = await entry(uriPath(op.oldUri));
 			const target = uriPath(op.newUri);
@@ -176,24 +177,25 @@ export async function applyPreview(token: string): Promise<Preview> {
 		const undo: (() => Promise<void>)[] = [];
 		try {
 			for (const change of preview.changes) {
+				// Each undo is registered before its step, so a step that fails half done is undone too.
+				const previous = change.before;
+				const restore = () => (previous === undefined ? rm(change.path, { force: true }) : writeFile(change.path, previous));
 				if (change.from) {
-					const original = await readFile(change.from);
-					await writeKeepingMode(change.path, change.after ?? "", change.from);
-					await unlink(change.from);
-					const previous = change.before;
+					const source = change.from;
+					const original = await readFile(source);
 					undo.push(async () => {
-						await writeFile(change.from as string, original);
-						if (previous === undefined) await rm(change.path, { force: true });
-						else await writeFile(change.path, previous);
+						await writeFile(source, original);
+						await restore();
 					});
+					await writeKeepingMode(change.path, change.after ?? "", source);
+					await unlink(source);
 				} else if (change.delete) {
 					const original = await readFile(change.path);
-					await unlink(change.path);
 					undo.push(() => writeFile(change.path, original));
+					await unlink(change.path);
 				} else {
+					undo.push(restore);
 					await writeKeepingMode(change.path, change.after ?? "");
-					const previous = change.before;
-					undo.push(async () => (previous === undefined ? rm(change.path, { force: true }) : writeFile(change.path, previous)));
 				}
 			}
 		} catch (error) {

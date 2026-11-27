@@ -357,6 +357,8 @@ export class LspClient {
 			return await Promise.any(candidates);
 		} catch {
 			if (signal?.aborted) throw new LspError("aborted");
+			// Some push servers (typescript-language-server) publish nothing when a clean file stays clean.
+			if (!provider && this.pushed.get(doc.uri)?.diagnostics.length === 0) return { status: "fresh", items: [] };
 			if (!provider && this.docs.get(doc.uri)?.version === doc.version) this.silent.set(doc.uri, doc.version);
 			return { status: "timeout", items: [] };
 		} finally {
