@@ -416,8 +416,10 @@ test("a child session is found by the id pi put in its transcript's name", () =>
 });
 
 test("the digest tells a throwaway child where the session stands", () => {
+	const list = join(mkdtempSync(join(tmpdir(), "ws-todo-")), "plan.md");
+	writeFileSync(list, "# Plan\n\n## Steps\n- [x] parse\n- [ ] wire\n");
 	const entries = [
-		{ type: "custom", customType: "checkpoint", data: { state: "done: x\nnext: y", at: "t" } },
+		{ type: "custom", customType: "todo", data: { file: list } },
 		{ type: "message", message: { role: "user", content: [{ type: "text", text: "wire the parser" }] } },
 		{
 			type: "message",
@@ -431,7 +433,7 @@ test("the digest tells a throwaway child where the session stands", () => {
 		},
 	];
 	const digest = sessionDigest(entries, "is the parser wired?");
-	assert.match(digest, /Checkpoint:\ndone: x/);
+	assert.match(digest, /Progress:\n1\. \[x\] parse\n2\. \[ \] wire/);
 	assert.match(digest, /Last request from the user:\nwire the parser/);
 	assert.match(digest, /edit src\/a\.ts/);
 	assert.match(digest, /run bun test/);

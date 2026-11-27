@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
 import { type AgentToolResult, type ExtensionAPI, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { lastCheckpoint } from "../checkpoint/index.ts";
+import { readSteps, renderSteps, todoFile } from "../plan/todo.ts";
 import { addUsage } from "../footer/cost.ts";
 import { untilInterrupt } from "./interrupt.ts";
 import { claimed, trackJob } from "./jobs.ts";
@@ -125,10 +125,10 @@ const clip = (text: string, limit: number) => {
 const elapsed = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`);
 
 /** Where the session stands, for a child that cannot see its transcript. */
-export function sessionDigest(entries: Entry[], question: string): string {
+export function sessionDigest(entries: Entry[], question: string, sessionFile?: string): string {
 	const parts: string[] = [];
-	const checkpoint = lastCheckpoint({ getBranch: () => entries });
-	if (checkpoint) parts.push(`Checkpoint:\n${checkpoint.state}`);
+	const steps = readSteps(todoFile(entries, sessionFile));
+	if (steps.length > 0) parts.push(`Progress:\n${renderSteps(steps)}`);
 	const requests = entries.flatMap((entry) => (entry.type === "message" && entry.message?.role === "user" ? [textOf(entry.message.content)] : [])).filter(Boolean);
 	if (requests.length > 0) parts.push(`Last request from the user:\n${clip(requests.at(-1) ?? "", 600)}`);
 	const calls = entries.flatMap((entry) => (entry.type === "message" && entry.message?.role === "assistant" ? callsOf(entry.message.content) : []));
@@ -483,7 +483,7 @@ export function registerSubagent(pi: ExtensionAPI, options: SubagentOptions) {
 			if (!scout) return ctx.ui.notify("No btw agent in the agents directory.", "error");
 			ctx.ui.setStatus("btw", "thinking");
 			try {
-				const outcome = await run(scout, sessionDigest(ctx.sessionManager.getBranch() as Entry[], question), undefined, randomUUID(), undefined, undefined, 120);
+				const outcome = await run(scout, sessionDigest(ctx.sessionManager.getBranch() as Entry[], question, ctx.sessionManager.getSessionFile()), undefined, randomUUID(), undefined, undefined, 120);
 				pi.appendEntry("btw", { question, answer: outcome.text });
 				ctx.ui.notify(outcome.text, outcome.failed ? "error" : "info");
 			} finally {
